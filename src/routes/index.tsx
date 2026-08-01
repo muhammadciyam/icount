@@ -46,10 +46,20 @@ function Index() {
   const [showAdd, setShowAdd] = useState(false);
   const [loaded, setLoaded] = useState(false);
 
+  const items = useMemo<Item[]>(() => {
+    return [...(inventory as Item[]), ...Object.values(customItems)];
+  }, [customItems]);
+
   useEffect(() => {
     try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) setCounts(JSON.parse(raw));
+      const rawCounts = localStorage.getItem(STORAGE_KEY);
+      if (rawCounts) setCounts(JSON.parse(rawCounts));
+    } catch {
+      /* ignore */
+    }
+    try {
+      const rawItems = localStorage.getItem(INVENTORY_KEY);
+      if (rawItems) setCustomItems(JSON.parse(rawItems));
     } catch {
       /* ignore */
     }
@@ -59,6 +69,10 @@ function Index() {
   useEffect(() => {
     if (loaded) localStorage.setItem(STORAGE_KEY, JSON.stringify(counts));
   }, [counts, loaded]);
+
+  useEffect(() => {
+    if (loaded) localStorage.setItem(INVENTORY_KEY, JSON.stringify(customItems));
+  }, [customItems, loaded]);
 
   const results = useMemo(() => {
     const q = query.trim().toLowerCase();
