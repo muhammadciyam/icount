@@ -130,12 +130,42 @@ function Index() {
               ))}
             </div>
             <div className="flex items-center gap-2">
+              <label className="cursor-pointer rounded-md px-2 py-1 text-primary hover:bg-primary/10">
+                Import Excel
+                <input
+                  type="file"
+                  accept=".xlsx,.xls,.csv"
+                  className="hidden"
+                  onChange={async (e) => {
+                    const file = e.target.files?.[0];
+                    e.target.value = "";
+                    if (!file) return;
+                    try {
+                      const imported = await parseSheet(file);
+                      if (imported.length === 0) {
+                        alert("No rows found. Make sure the sheet has columns like Barcode/ID, Name, Qty.");
+                        return;
+                      }
+                      setCustomItems((prev) => {
+                        const next = { ...prev };
+                        for (const it of imported) next[it.id] = it;
+                        return next;
+                      });
+                      alert(`Imported ${imported.length} items.`);
+                    } catch (err) {
+                      alert("Could not read that file. Please upload a valid Excel or CSV file.");
+                      console.error(err);
+                    }
+                  }}
+                />
+              </label>
               <button
                 onClick={() => setShowAdd(true)}
                 className="rounded-md px-2 py-1 text-primary hover:bg-primary/10"
               >
                 + Add item
               </button>
+
               <button
                 onClick={() => {
                   if (confirm("Clear all counted items?")) setCounts({});
