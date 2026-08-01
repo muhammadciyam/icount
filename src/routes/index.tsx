@@ -11,10 +11,11 @@ type Item = {
   price: number;
 };
 
-const items = inventory as Item[];
 const STORAGE_KEY = "stock-count-v1";
+const INVENTORY_KEY = "stock-inventory-v1";
 
 type CountState = Record<string, number>;
+type InventoryState = Record<string, Item>;
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -40,13 +41,25 @@ export const Route = createFileRoute("/")({
 function Index() {
   const [query, setQuery] = useState("");
   const [counts, setCounts] = useState<CountState>({});
+  const [customItems, setCustomItems] = useState<InventoryState>({});
   const [filter, setFilter] = useState<"all" | "pending" | "counted">("all");
+  const [showAdd, setShowAdd] = useState(false);
   const [loaded, setLoaded] = useState(false);
+
+  const items = useMemo<Item[]>(() => {
+    return [...(inventory as Item[]), ...Object.values(customItems)];
+  }, [customItems]);
 
   useEffect(() => {
     try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) setCounts(JSON.parse(raw));
+      const rawCounts = localStorage.getItem(STORAGE_KEY);
+      if (rawCounts) setCounts(JSON.parse(rawCounts));
+    } catch {
+      /* ignore */
+    }
+    try {
+      const rawItems = localStorage.getItem(INVENTORY_KEY);
+      if (rawItems) setCustomItems(JSON.parse(rawItems));
     } catch {
       /* ignore */
     }
@@ -56,6 +69,10 @@ function Index() {
   useEffect(() => {
     if (loaded) localStorage.setItem(STORAGE_KEY, JSON.stringify(counts));
   }, [counts, loaded]);
+
+  useEffect(() => {
+    if (loaded) localStorage.setItem(INVENTORY_KEY, JSON.stringify(customItems));
+  }, [customItems, loaded]);
 
   const results = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -112,14 +129,22 @@ function Index() {
                 </button>
               ))}
             </div>
-            <button
-              onClick={() => {
-                if (confirm("Clear all counted items?")) setCounts({});
-              }}
-              className="rounded-md px-2 py-1 text-destructive hover:bg-destructive/10"
-            >
-              Reset count
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setShowAdd(true)}
+                className="rounded-md px-2 py-1 text-primary hover:bg-primary/10"
+              >
+                + Add item
+              </button>
+              <button
+                onClick={() => {
+                  if (confirm("Clear all counted items?")) setCounts({});
+                }}
+                className="rounded-md px-2 py-1 text-destructive hover:bg-destructive/10"
+              >
+                Reset count
+              </button>
+            </div>
           </div>
         </div>
       </header>
@@ -152,6 +177,16 @@ function Index() {
           </p>
         )}
       </div>
+
+      {showAdd && (
+        <AddItemModal
+          onClose={() => setShowAdd(false)}
+          onSave={(item) => {
+            setCustomItems((prev) => ({ ...prev, [item.id]: item }));
+            setShowAdd(false);
+          }}
+        />
+      )}
     </main>
   );
 }
@@ -248,5 +283,105 @@ function Row({
         </div>
       )}
     </li>
+  );
+}
+
+function AddItemModal({
+  onClose,
+  onSave,
+}: {
+  onClose: () => void;
+  onSave: (item: Item) => void;
+}) {
+  const [name, setName] = useState("");
+  const [loc, setLoc] = useState("");
+  const [qty, setQty] = useState("");
+  const [cost, setCost] = useState("");
+  const [price, setPrice] = useState("");
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const n = name.trim();
+    const qNum = Number(qty);
+    const cNum = Number(cost);
+    const pNum = Number(price);
+    if (!n || Number.isNaN(qNum) || Number.isNaN(cNum) || Number.isNaN(pNum)) return;
+    onSave({
+      id: `custom-${Date.now()}`,
+      name: n,
+      loc: loc.trim() || "N/A",
+      qty: qNum,
+      cost: cNum,
+      price: pNum,
+    });
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 p-4 sm:items-center">
+      <div className="w-full max-w-md rounded-2xl border border-border bg-card p-5 shadow-lg">
+        <div className="mb-4 flex items-center justify-between">
+          <h2 className="text-lg font-semibold text-foreground">Add new item</h2>
+          <button
+            onClick={onClose}
+            className="rounded-md p-1 text-muted-foreground hover:bg-muted"
+            aria-label="Close"
+          >
+            ×
+          </button>
+        </div>
+        <form onSubmit={handleSubmit} className="space-y-3">
+          <input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Item name *"
+            maxLength={120}
+            required
+            className="w-full rounded-lg border border-input bg-background px-3 py-2 text-base text-foreground outline-none focus:ring-2 focus:ring-ring"
+          />
+          <input
+            value={loc}
+            onChange={(e) => setLoc(e.target.value)}
+            placeholder="Location"
+            maxLength={60}
+            className="w-full rounded-lg border border-input bg-background px-3 py-2 text-base text-foreground outline-none focus:ring-2 focus:ring-ring"
+          />
+          <div className="grid grid-cols-3 gap-2">
+            <input
+              type="number"
+              step="any"
+              value={qty}
+              onChange={(e) => setQty(e.target.value)}
+              placeholder="Qty *"
+              required
+              className="w-full rounded-lg border border-input bg-background px-3 py-2 text-base text-foreground outline-none focus:ring-2 focus:ring-ring"
+            />
+            <input
+              type="number"
+              step="any"
+              value={cost}
+              onChange={(e) => setCost(e.target.value)}
+              placeholder="Cost *"
+              required
+              className="w-full rounded-lg border border-input bg-background px-3 py-2 text-base text-foreground outline-none focus:ring-2 focus:ring-ring"
+            />
+            <input
+              type="number"
+              step="any"
+              value={price}
+              onChange={(e) => setPrice(e.target.value)}
+              placeholder="Price *"
+              required
+              className="w-full rounded-lg border border-input bg-background px-3 py-2 text-base text-foreground outline-none focus:ring-2 focus:ring-ring"
+            />
+          </div>
+          <button
+            type="submit"
+            className="w-full rounded-lg bg-primary py-2.5 text-sm font-medium text-primary-foreground"
+          >
+            Save item
+          </button>
+        </form>
+      </div>
+    </div>
   );
 }
