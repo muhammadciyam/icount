@@ -17,6 +17,47 @@ const INVENTORY_KEY = "stock-inventory-v1";
 type CountState = Record<string, number>;
 type InventoryState = Record<string, Item>;
 
+const pick = (row: Record<string, unknown>, keys: string[]) => {
+  for (const k of Object.keys(row)) {
+    const norm = k.toLowerCase().replace(/[^a-z]/g, "");
+    if (keys.includes(norm)) return row[k];
+  }
+  return undefined;
+};
+
+const num = (v: unknown) => {
+  const n = Number(String(v ?? "").replace(/[^0-9.-]/g, ""));
+  return Number.isFinite(n) ? n : 0;
+};
+
+async function parseSheet(file: File): Promise<Item[]> {
+  const XLSX = await import("xlsx");
+  const buf = await file.arrayBuffer();
+  const wb = XLSX.read(buf, { type: "array" });
+  const sheet = wb.Sheets[wb.SheetNames[0] ?? ""];
+  if (!sheet) return [];
+
+  const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: "" });
+  const out: Item[] = [];
+  rows.forEach((row, i) => {
+    const name = String(pick(row, ["name", "item", "itemname", "description", "product"]) ?? "").trim();
+    const id = String(
+      pick(row, ["id", "barcode", "code", "sku", "itemcode", "itemid"]) ?? "",
+    ).trim();
+    if (!name && !id) return;
+    out.push({
+      id: id || `X-${Date.now()}-${i}`,
+      name: name || id,
+      loc: String(pick(row, ["loc", "location", "shelf", "aisle", "rack"]) ?? "").trim(),
+      qty: num(pick(row, ["qty", "quantity", "stock", "systemqty", "onhand", "balance"])),
+      cost: num(pick(row, ["cost", "costprice", "purchaseprice", "buyprice"])),
+      price: num(pick(row, ["price", "sellprice", "sellingprice", "retailprice", "unitprice"])),
+    });
+  });
+  return out;
+}
+
+
 export const Route = createFileRoute("/")({
   head: () => ({
     meta: [
@@ -130,12 +171,42 @@ function Index() {
               ))}
             </div>
             <div className="flex items-center gap-2">
+              <label className="cursor-pointer rounded-md px-2 py-1 text-primary hover:bg-primary/10">
+                Import Excel
+                <input
+                  type="file"
+                  accept=".xlsx,.xls,.csv"
+                  className="hidden"
+                  onChange={async (e) => {
+                    const file = e.target.files?.[0];
+                    e.target.value = "";
+                    if (!file) return;
+                    try {
+                      const imported = await parseSheet(file);
+                      if (imported.length === 0) {
+                        alert("No rows found. Make sure the sheet has columns like Barcode/ID, Name, Qty.");
+                        return;
+                      }
+                      setCustomItems((prev) => {
+                        const next = { ...prev };
+                        for (const it of imported) next[it.id] = it;
+                        return next;
+                      });
+                      alert(`Imported ${imported.length} items.`);
+                    } catch (err) {
+                      alert("Could not read that file. Please upload a valid Excel or CSV file.");
+                      console.error(err);
+                    }
+                  }}
+                />
+              </label>
               <button
                 onClick={() => setShowAdd(true)}
                 className="rounded-md px-2 py-1 text-primary hover:bg-primary/10"
               >
                 + Add item
               </button>
+
               <button
                 onClick={() => {
                   if (confirm("Clear all counted items?")) setCounts({});
