@@ -40,7 +40,7 @@ export const Route = createFileRoute("/")({
 function Index() {
   const [query, setQuery] = useState("");
   const [counts, setCounts] = useState<CountState>({});
-  const [onlyPending, setOnlyPending] = useState(false);
+  const [filter, setFilter] = useState<"all" | "pending" | "counted">("all");
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
