@@ -11,10 +11,11 @@ type Item = {
   price: number;
 };
 
-const items = inventory as Item[];
 const STORAGE_KEY = "stock-count-v1";
+const INVENTORY_KEY = "stock-inventory-v1";
 
 type CountState = Record<string, number>;
+type InventoryState = Record<string, Item>;
 
 export const Route = createFileRoute("/")({
   head: () => ({
