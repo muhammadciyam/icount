@@ -97,15 +97,17 @@ function Index() {
             className="mt-3 w-full rounded-xl border border-input bg-background px-4 py-3 text-base text-foreground outline-none placeholder:text-muted-foreground focus:ring-2 focus:ring-ring"
           />
           <div className="mt-2 flex items-center justify-between text-sm">
-            <label className="flex items-center gap-2 text-muted-foreground">
-              <input
-                type="checkbox"
-                checked={onlyPending}
-                onChange={(e) => setOnlyPending(e.target.checked)}
-                className="size-4 accent-current"
-              />
-              Show only not-counted
-            </label>
+            <div className="flex gap-1 rounded-lg border border-input p-0.5">
+              {(["all", "pending", "counted"] as const).map((f) => (
+                <button
+                  key={f}
+                  onClick={() => setFilter(f)}
+                  className={`rounded-md`}
+                >
+                  {f === "all" ? "All" : f === "pending" ? "Not counted" : "Counted"}
+                </button>
+              ))}
+            </div>
             <button
               onClick={() => {
                 if (confirm("Clear all counted items?")) setCounts({});
