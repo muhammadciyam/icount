@@ -40,7 +40,7 @@ export const Route = createFileRoute("/")({
 function Index() {
   const [query, setQuery] = useState("");
   const [counts, setCounts] = useState<CountState>({});
-  const [onlyPending, setOnlyPending] = useState(false);
+  const [filter, setFilter] = useState<"all" | "pending" | "counted">("all");
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
@@ -67,9 +67,10 @@ function Index() {
         return terms.every((t) => hay.includes(t));
       });
     }
-    if (onlyPending) list = list.filter((i) => counts[i.id] === undefined);
+    if (filter === "pending") list = list.filter((i) => counts[i.id] === undefined);
+    if (filter === "counted") list = list.filter((i) => counts[i.id] !== undefined);
     return list.slice(0, 200);
-  }, [query, onlyPending, counts]);
+  }, [query, filter, counts]);
 
   const done = Object.keys(counts).length;
   const pct = Math.round((done / items.length) * 100);
@@ -96,15 +97,21 @@ function Index() {
             className="mt-3 w-full rounded-xl border border-input bg-background px-4 py-3 text-base text-foreground outline-none placeholder:text-muted-foreground focus:ring-2 focus:ring-ring"
           />
           <div className="mt-2 flex items-center justify-between text-sm">
-            <label className="flex items-center gap-2 text-muted-foreground">
-              <input
-                type="checkbox"
-                checked={onlyPending}
-                onChange={(e) => setOnlyPending(e.target.checked)}
-                className="size-4 accent-current"
-              />
-              Show only not-counted
-            </label>
+            <div className="flex gap-1 rounded-lg border border-input p-0.5">
+              {(["all", "pending", "counted"] as const).map((f) => (
+                <button
+                  key={f}
+                  onClick={() => setFilter(f)}
+                  className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
+                    filter === f
+                      ? "bg-primary text-primary-foreground"
+                      : "text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  {f === "all" ? "All" : f === "pending" ? "Not counted" : "Counted"}
+                </button>
+              ))}
+            </div>
             <button
               onClick={() => {
                 if (confirm("Clear all counted items?")) setCounts({});
