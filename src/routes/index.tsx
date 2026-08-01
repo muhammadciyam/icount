@@ -156,7 +156,7 @@ function Row({
   onClear,
 }: {
   item: Item;
-  counted?: number;
+  counted?: number | undefined;
   onSave: (v: number) => void;
   onClear: () => void;
 }) {
