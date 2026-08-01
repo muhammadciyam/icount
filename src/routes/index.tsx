@@ -102,7 +102,11 @@ function Index() {
                 <button
                   key={f}
                   onClick={() => setFilter(f)}
-                  className={`rounded-md`}
+                  className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
+                    filter === f
+                      ? "bg-primary text-primary-foreground"
+                      : "text-muted-foreground hover:text-foreground"
+                  }`}
                 >
                   {f === "all" ? "All" : f === "pending" ? "Not counted" : "Counted"}
                 </button>
