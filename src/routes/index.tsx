@@ -28,7 +28,7 @@ export const Route = createFileRoute("/")({
       { property: "og:title", content: "Stock Count — Seven Mart Inventory Counter" },
       {
         property: "og:description",
-        content: "Search items, tick counted stock and see variance instantly.",
+        content: "Search inventory items, enter counted quantity and tick them off. Track counting progress and variance against system stock.",
       },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
