@@ -177,6 +177,16 @@ function Index() {
           </p>
         )}
       </div>
+
+      {showAdd && (
+        <AddItemModal
+          onClose={() => setShowAdd(false)}
+          onSave={(item) => {
+            setCustomItems((prev) => ({ ...prev, [item.id]: item }));
+            setShowAdd(false);
+          }}
+        />
+      )}
     </main>
   );
 }
