@@ -41,7 +41,9 @@ export const Route = createFileRoute("/")({
 function Index() {
   const [query, setQuery] = useState("");
   const [counts, setCounts] = useState<CountState>({});
+  const [customItems, setCustomItems] = useState<InventoryState>({});
   const [filter, setFilter] = useState<"all" | "pending" | "counted">("all");
+  const [showAdd, setShowAdd] = useState(false);
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
