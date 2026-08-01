@@ -67,9 +67,10 @@ function Index() {
         return terms.every((t) => hay.includes(t));
       });
     }
-    if (onlyPending) list = list.filter((i) => counts[i.id] === undefined);
+    if (filter === "pending") list = list.filter((i) => counts[i.id] === undefined);
+    if (filter === "counted") list = list.filter((i) => counts[i.id] !== undefined);
     return list.slice(0, 200);
-  }, [query, onlyPending, counts]);
+  }, [query, filter, counts]);
 
   const done = Object.keys(counts).length;
   const pct = Math.round((done / items.length) * 100);
