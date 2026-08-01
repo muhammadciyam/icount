@@ -34,7 +34,9 @@ async function parseSheet(file: File): Promise<Item[]> {
   const XLSX = await import("xlsx");
   const buf = await file.arrayBuffer();
   const wb = XLSX.read(buf, { type: "array" });
-  const sheet = wb.Sheets[wb.SheetNames[0]];
+  const sheet = wb.Sheets[wb.SheetNames[0] ?? ""];
+  if (!sheet) return [];
+
   const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: "" });
   const out: Item[] = [];
   rows.forEach((row, i) => {
