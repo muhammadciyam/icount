@@ -129,14 +129,22 @@ function Index() {
                 </button>
               ))}
             </div>
-            <button
-              onClick={() => {
-                if (confirm("Clear all counted items?")) setCounts({});
-              }}
-              className="rounded-md px-2 py-1 text-destructive hover:bg-destructive/10"
-            >
-              Reset count
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setShowAdd(true)}
+                className="rounded-md px-2 py-1 text-primary hover:bg-primary/10"
+              >
+                + Add item
+              </button>
+              <button
+                onClick={() => {
+                  if (confirm("Clear all counted items?")) setCounts({});
+                }}
+                className="rounded-md px-2 py-1 text-destructive hover:bg-destructive/10"
+              >
+                Reset count
+              </button>
+            </div>
           </div>
         </div>
       </header>
