@@ -123,6 +123,7 @@ function Index() {
   const [customItems, setCustomItems] = useState<InventoryState>({});
   const [filter, setFilter] = useState<"all" | "pending" | "counted" | "deleted">("all");
   const [showAdd, setShowAdd] = useState(false);
+  const [editingItem, setEditingItem] = useState<Item | null>(null);
   const [showStaffPanel, setShowStaffPanel] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [account, setAccount] = useState<StaffAccount | null>(null);
@@ -347,6 +348,36 @@ function Index() {
       if (error) {
         console.error("Failed to save items", error);
         alert("Could not save item(s) to the shared database — check your connection and try again.");
+      }
+    }
+  };
+
+  // Edits an existing custom item's own details (name/location/system qty/
+  // cost/price) — not to be confused with saveCount, which records what
+  // staff *counted*. Restricted to custom rows, same as delete/restore, so
+  // the bundled base catalog stays read-only.
+  const updateItem = async (updated: Item) => {
+    setCustomItems((prev) => {
+      const it = prev[updated.id];
+      if (!it || it.source === "base") return prev;
+      return { ...prev, [updated.id]: { ...it, ...updated } };
+    });
+    if (supabaseEnabled && supabase) {
+      const { error } = await supabase
+        .from("stock_items")
+        .update({
+          name: updated.name,
+          loc: updated.loc,
+          qty: updated.qty,
+          cost: updated.cost,
+          price: updated.price,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", updated.id)
+        .eq("source", "custom");
+      if (error) {
+        console.error("Failed to update item", error);
+        alert("Could not save changes to the shared database — check your connection and try again.");
       }
     }
   };
@@ -640,6 +671,7 @@ function Index() {
                 isDeleted={!!item.deleted}
                 onSave={(v) => void saveCount(item.id, v)}
                 onClear={() => void clearCount(item.id)}
+                onEdit={() => setEditingItem(item)}
                 onDelete={() => void deleteItem(item.id)}
                 onRestore={() => void restoreItem(item.id)}
               />
@@ -654,11 +686,26 @@ function Index() {
       </div>
 
       {showAdd && (
-        <AddItemModal
+        <ItemFormModal
+          title="Add new item"
+          submitLabel="Save item"
           onClose={() => setShowAdd(false)}
           onSave={(item) => {
             void addItems([item]);
             setShowAdd(false);
+          }}
+        />
+      )}
+
+      {editingItem && (
+        <ItemFormModal
+          title="Edit item"
+          submitLabel="Save changes"
+          initial={editingItem}
+          onClose={() => setEditingItem(null)}
+          onSave={(item) => {
+            void updateItem(item);
+            setEditingItem(null);
           }}
         />
       )}
@@ -683,6 +730,7 @@ function Row({
   isDeleted,
   onSave,
   onClear,
+  onEdit,
   onDelete,
   onRestore,
 }: {
@@ -693,6 +741,7 @@ function Row({
   isDeleted: boolean;
   onSave: (v: number) => void;
   onClear: () => void;
+  onEdit: () => void;
   onDelete: () => void;
   onRestore: () => void;
 }) {
@@ -816,24 +865,33 @@ function Row({
                 </button>
               </form>
               {isCustom && (
-                <button
-                  type="button"
-                  title={isAdmin ? undefined : "Admin only"}
-                  onClick={() => {
-                    if (!isAdmin) {
-                      alert("Only an admin can delete items.");
-                      return;
-                    }
-                    if (confirm(`Delete "${item.name}" from inventory?`)) onDelete();
-                  }}
-                  className={`w-full rounded-lg border px-3 py-2 text-sm font-medium transition-colors ${
-                    isAdmin
-                      ? "border-destructive/40 text-destructive hover:bg-destructive/10"
-                      : "cursor-not-allowed border-input text-muted-foreground/50"
-                  }`}
-                >
-                  Delete item
-                </button>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={onEdit}
+                    className="flex-1 rounded-lg border border-input px-3 py-2 text-sm font-medium text-foreground transition-colors hover:bg-muted"
+                  >
+                    Edit item
+                  </button>
+                  <button
+                    type="button"
+                    title={isAdmin ? undefined : "Admin only"}
+                    onClick={() => {
+                      if (!isAdmin) {
+                        alert("Only an admin can delete items.");
+                        return;
+                      }
+                      if (confirm(`Delete "${item.name}" from inventory?`)) onDelete();
+                    }}
+                    className={`flex-1 rounded-lg border px-3 py-2 text-sm font-medium transition-colors ${
+                      isAdmin
+                        ? "border-destructive/40 text-destructive hover:bg-destructive/10"
+                        : "cursor-not-allowed border-input text-muted-foreground/50"
+                    }`}
+                  >
+                    Delete item
+                  </button>
+                </div>
               )}
             </>
           )}
@@ -843,18 +901,24 @@ function Row({
   );
 }
 
-function AddItemModal({
+function ItemFormModal({
+  title,
+  submitLabel,
+  initial,
   onClose,
   onSave,
 }: {
+  title: string;
+  submitLabel: string;
+  initial?: Item;
   onClose: () => void;
   onSave: (item: Item) => void;
 }) {
-  const [name, setName] = useState("");
-  const [loc, setLoc] = useState("");
-  const [qty, setQty] = useState("");
-  const [cost, setCost] = useState("");
-  const [price, setPrice] = useState("");
+  const [name, setName] = useState(initial?.name ?? "");
+  const [loc, setLoc] = useState(initial?.loc ?? "");
+  const [qty, setQty] = useState(initial ? String(initial.qty) : "");
+  const [cost, setCost] = useState(initial ? String(initial.cost) : "");
+  const [price, setPrice] = useState(initial ? String(initial.price) : "");
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -864,7 +928,8 @@ function AddItemModal({
     const pNum = Number(price);
     if (!n || Number.isNaN(qNum) || Number.isNaN(cNum) || Number.isNaN(pNum)) return;
     onSave({
-      id: `custom-${Date.now()}`,
+      ...initial,
+      id: initial?.id ?? `custom-${Date.now()}`,
       name: n,
       loc: loc.trim() || "N/A",
       qty: qNum,
@@ -877,7 +942,7 @@ function AddItemModal({
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 p-4 sm:items-center">
       <div className="w-full max-w-md rounded-2xl border border-border bg-card p-5 shadow-lg">
         <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-foreground">Add new item</h2>
+          <h2 className="text-lg font-semibold text-foreground">{title}</h2>
           <button
             onClick={onClose}
             className="rounded-md p-1 text-muted-foreground hover:bg-muted"
@@ -935,7 +1000,7 @@ function AddItemModal({
             type="submit"
             className="w-full rounded-lg bg-primary py-2.5 text-sm font-medium text-primary-foreground"
           >
-            Save item
+            {submitLabel}
           </button>
         </form>
       </div>
