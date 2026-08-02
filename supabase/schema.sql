@@ -49,7 +49,7 @@ alter publication supabase_realtime add table stock_items;
 -- so without that re-check anyone could call these functions and
 -- claim to be an admin.
 -- ============================================================
-create extension if not exists pgcrypto;
+create extension if not exists pgcrypto with schema extensions;
 
 create table if not exists staff_accounts (
   id uuid primary key default gen_random_uuid(),
@@ -74,7 +74,7 @@ as $$
   select id, email, name, role
   from staff_accounts
   where email = lower(p_email)
-    and password_hash = crypt(p_password, password_hash);
+    and password_hash = extensions.crypt(p_password, password_hash);
 $$;
 
 -- Directory listing for the "manage staff" panel. No secrets in here
@@ -106,7 +106,7 @@ begin
   if not exists (
     select 1 from staff_accounts
     where email = lower(p_admin_email)
-      and password_hash = crypt(p_admin_password, password_hash)
+      and password_hash = extensions.crypt(p_admin_password, password_hash)
       and role = 'admin'
   ) then
     raise exception 'Not authorized';
@@ -114,7 +114,7 @@ begin
 
   return query
   insert into staff_accounts (email, name, password_hash, role)
-  values (lower(p_new_email), p_new_name, crypt(p_new_password, gen_salt('bf')), p_new_role)
+  values (lower(p_new_email), p_new_name, extensions.crypt(p_new_password, extensions.gen_salt('bf')), p_new_role)
   returning staff_accounts.id, staff_accounts.email, staff_accounts.name, staff_accounts.role;
 end;
 $$;
@@ -135,14 +135,14 @@ begin
   if not exists (
     select 1 from staff_accounts
     where email = lower(p_admin_email)
-      and password_hash = crypt(p_admin_password, password_hash)
+      and password_hash = extensions.crypt(p_admin_password, password_hash)
       and role = 'admin'
   ) then
     raise exception 'Not authorized';
   end if;
 
   update staff_accounts
-  set password_hash = crypt(p_new_password, gen_salt('bf'))
+  set password_hash = extensions.crypt(p_new_password, extensions.gen_salt('bf'))
   where id = p_target_id;
 end;
 $$;
@@ -163,7 +163,7 @@ begin
   if not exists (
     select 1 from staff_accounts
     where email = lower(p_admin_email)
-      and password_hash = crypt(p_admin_password, password_hash)
+      and password_hash = extensions.crypt(p_admin_password, password_hash)
       and role = 'admin'
   ) then
     raise exception 'Not authorized';
@@ -180,7 +180,7 @@ $$;
 
 -- Seed the admin account (safe to re-run — does nothing if it already exists).
 insert into staff_accounts (email, name, password_hash, role)
-values ('siyante003@gmail.com', 'Admin', crypt('229022#', gen_salt('bf')), 'admin')
+values ('siyante003@gmail.com', 'Admin', extensions.crypt('229022#', extensions.gen_salt('bf')), 'admin')
 on conflict (email) do nothing;
 
 -- The table itself stays locked down; only these functions are callable.
