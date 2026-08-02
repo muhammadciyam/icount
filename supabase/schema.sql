@@ -103,11 +103,15 @@ security definer
 set search_path = public
 as $$
 begin
+  -- Table alias (sa) is required here: this function's OUT parameters are
+  -- named id/email/name/role (from `returns table`), which PL/pgSQL turns
+  -- into local variables of the same names — an unqualified "email" or
+  -- "role" below would collide with those and raise "ambiguous column".
   if not exists (
-    select 1 from staff_accounts
-    where email = lower(p_admin_email)
-      and password_hash = extensions.crypt(p_admin_password, password_hash)
-      and role = 'admin'
+    select 1 from staff_accounts sa
+    where sa.email = lower(p_admin_email)
+      and sa.password_hash = extensions.crypt(p_admin_password, sa.password_hash)
+      and sa.role = 'admin'
   ) then
     raise exception 'Not authorized';
   end if;

@@ -321,6 +321,52 @@ function Index() {
     }
   };
 
+  const deleteItem = async (itemId: string) => {
+    setCustomItems((prev) => {
+      const next = { ...prev };
+      delete next[itemId];
+      return next;
+    });
+    setCounts((c) => {
+      const n = { ...c };
+      delete n[itemId];
+      return n;
+    });
+    if (supabaseEnabled && supabase) {
+      const { error } = await supabase.from("stock_items").delete().eq("id", itemId);
+      if (error) {
+        console.error("Failed to delete item", error);
+        alert("Could not delete that item from the shared database — check your connection and try again.");
+      }
+      const { error: countError } = await supabase.from("stock_counts").delete().eq("item_id", itemId);
+      if (countError) console.error("Failed to delete count for item", countError);
+    }
+  };
+
+  // Clears everything added via "+ Add item" or Excel import. The base
+  // inventory bundled with the app (inventory.json) is untouched — it isn't
+  // stored in the database, so there's nothing there to delete.
+  const deleteAllCustomItems = async () => {
+    const ids = Object.keys(customItems);
+    setCustomItems({});
+    setCounts((c) => {
+      const n = { ...c };
+      for (const id of ids) delete n[id];
+      return n;
+    });
+    if (supabaseEnabled && supabase) {
+      const { error } = await supabase.from("stock_items").delete().neq("id", "");
+      if (error) {
+        console.error("Failed to delete all items", error);
+        alert("Could not delete all items from the shared database — check your connection and try again.");
+      }
+      if (ids.length > 0) {
+        const { error: countError } = await supabase.from("stock_counts").delete().in("item_id", ids);
+        if (countError) console.error("Failed to delete counts for items", countError);
+      }
+    }
+  };
+
   const results = useMemo(() => {
     const q = query.trim().toLowerCase();
     let list = items;
@@ -488,6 +534,34 @@ function Index() {
               >
                 Reset count
               </button>
+
+              <button
+                onClick={() => {
+                  if (account.role !== "admin") {
+                    alert("Only an admin can delete all items.");
+                    return;
+                  }
+                  if (Object.keys(customItems).length === 0) {
+                    alert("No added/imported items to delete.");
+                    return;
+                  }
+                  if (
+                    confirm(
+                      `Delete all ${Object.keys(customItems).length} added/imported item(s)? The base inventory list isn't affected.`,
+                    )
+                  ) {
+                    void deleteAllCustomItems();
+                  }
+                }}
+                title={account.role === "admin" ? undefined : "Admin only"}
+                className={`min-h-9 rounded-lg px-2.5 py-1.5 font-medium transition-colors ${
+                  account.role === "admin"
+                    ? "text-destructive hover:bg-destructive/10"
+                    : "cursor-not-allowed text-muted-foreground/50"
+                }`}
+              >
+                Delete all items
+              </button>
             </div>
           </div>
         </div>
@@ -503,8 +577,11 @@ function Index() {
                 key={item.id}
                 item={item}
                 counted={counts[item.id]}
+                isCustom={customItems[item.id] !== undefined}
+                isAdmin={account.role === "admin"}
                 onSave={(v) => void saveCount(item.id, v)}
                 onClear={() => void clearCount(item.id)}
+                onDelete={() => void deleteItem(item.id)}
               />
             ))}
           </ul>
@@ -541,13 +618,19 @@ function Index() {
 function Row({
   item,
   counted,
+  isCustom,
+  isAdmin,
   onSave,
   onClear,
+  onDelete,
 }: {
   item: Item;
   counted?: number | undefined;
+  isCustom: boolean;
+  isAdmin: boolean;
   onSave: (v: number) => void;
   onClear: () => void;
+  onDelete: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState("");
@@ -631,6 +714,26 @@ function Row({
               Match
             </button>
           </form>
+          {isCustom && (
+            <button
+              type="button"
+              title={isAdmin ? undefined : "Admin only"}
+              onClick={() => {
+                if (!isAdmin) {
+                  alert("Only an admin can delete items.");
+                  return;
+                }
+                if (confirm(`Delete "${item.name}" from inventory?`)) onDelete();
+              }}
+              className={`w-full rounded-lg border px-3 py-2 text-sm font-medium transition-colors ${
+                isAdmin
+                  ? "border-destructive/40 text-destructive hover:bg-destructive/10"
+                  : "cursor-not-allowed border-input text-muted-foreground/50"
+              }`}
+            >
+              Delete item
+            </button>
+          )}
         </div>
       )}
     </li>
