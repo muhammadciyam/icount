@@ -234,6 +234,7 @@ function Index() {
                 qty: Number(r.qty),
                 cost: Number(r.cost),
                 price: Number(r.price),
+                source: (r.source as "base" | "custom" | undefined) ?? "custom",
               };
             }
             return next;
@@ -333,6 +334,7 @@ function Index() {
   };
 
   const deleteItem = async (itemId: string) => {
+    if (customItems[itemId]?.source === "base") return; // defense in depth — UI already hides this case
     setCustomItems((prev) => {
       const next = { ...prev };
       delete next[itemId];
@@ -344,7 +346,7 @@ function Index() {
       return n;
     });
     if (supabaseEnabled && supabase) {
-      const { error } = await supabase.from("stock_items").delete().eq("id", itemId);
+      const { error } = await supabase.from("stock_items").delete().eq("id", itemId).eq("source", "custom");
       if (error) {
         console.error("Failed to delete item", error);
         alert("Could not delete that item from the shared database — check your connection and try again.");
@@ -354,19 +356,25 @@ function Index() {
     }
   };
 
-  // Clears everything added via "+ Add item" or Excel import. The base
-  // inventory bundled with the app (inventory.json) is untouched — it isn't
-  // stored in the database, so there's nothing there to delete.
+  // Clears everything added via "+ Add item" or Excel import — i.e. rows
+  // tagged source='custom'. Rows tagged source='base' (the original bundled
+  // catalog, now also stored in stock_items) are never touched by this.
   const deleteAllCustomItems = async () => {
-    const ids = Object.keys(customItems);
-    setCustomItems({});
+    const ids = Object.entries(customItems)
+      .filter(([, it]) => it.source !== "base")
+      .map(([id]) => id);
+    setCustomItems((prev) => {
+      const next = { ...prev };
+      for (const id of ids) delete next[id];
+      return next;
+    });
     setCounts((c) => {
       const n = { ...c };
       for (const id of ids) delete n[id];
       return n;
     });
     if (supabaseEnabled && supabase) {
-      const { error } = await supabase.from("stock_items").delete().neq("id", "");
+      const { error } = await supabase.from("stock_items").delete().eq("source", "custom");
       if (error) {
         console.error("Failed to delete all items", error);
         alert("Could not delete all items from the shared database — check your connection and try again.");
@@ -588,7 +596,7 @@ function Index() {
                 key={item.id}
                 item={item}
                 counted={counts[item.id]}
-                isCustom={customItems[item.id] !== undefined}
+                isCustom={item.source !== "base"}
                 isAdmin={account.role === "admin"}
                 onSave={(v) => void saveCount(item.id, v)}
                 onClear={() => void clearCount(item.id)}
