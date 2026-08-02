@@ -214,8 +214,9 @@ function Index() {
   // devices/staff into this session as soon as they happen.
   useEffect(() => {
     if (!supabaseEnabled || !supabase) return;
+    const client = supabase;
 
-    const channel = supabase
+    const channel = client
       .channel("stock-sync")
       .on(
         "postgres_changes",
@@ -224,9 +225,9 @@ function Index() {
           setCounts((c) => {
             const next = { ...c };
             if (payload.eventType === "DELETE") {
-              delete next[payload.old.item_id as string];
+              delete next[payload.old["item_id"] as string];
             } else {
-              next[payload.new.item_id as string] = Number(payload.new.qty);
+              next[payload.new["item_id"] as string] = Number(payload.new["qty"]);
             }
             return next;
           });
@@ -239,18 +240,18 @@ function Index() {
           setCustomItems((prev) => {
             const next = { ...prev };
             if (payload.eventType === "DELETE") {
-              delete next[payload.old.id as string];
+              delete next[payload.old["id"] as string];
             } else {
               const r = payload.new;
-              next[r.id as string] = {
-                id: r.id as string,
-                name: r.name as string,
-                loc: (r.loc as string) ?? "",
-                qty: Number(r.qty),
-                cost: Number(r.cost),
-                price: Number(r.price),
-                source: (r.source as "base" | "custom" | undefined) ?? "custom",
-                deleted: (r.deleted as boolean | undefined) ?? false,
+              next[r["id"] as string] = {
+                id: r["id"] as string,
+                name: r["name"] as string,
+                loc: (r["loc"] as string) ?? "",
+                qty: Number(r["qty"]),
+                cost: Number(r["cost"]),
+                price: Number(r["price"]),
+                source: (r["source"] as "base" | "custom" | undefined) ?? "custom",
+                deleted: (r["deleted"] as boolean | undefined) ?? false,
               };
             }
             return next;
@@ -260,7 +261,7 @@ function Index() {
       .subscribe();
 
     return () => {
-      supabase.removeChannel(channel);
+      client.removeChannel(channel);
     };
   }, []);
 
