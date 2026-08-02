@@ -1,6 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import inventory from "@/data/inventory.json";
+import { supabase, supabaseEnabled } from "@/lib/supabase";
 
 type Item = {
   id: string;
@@ -15,17 +16,33 @@ const STORAGE_KEY = "stock-count-v1";
 const INVENTORY_KEY = "stock-inventory-v1";
 const AUTH_KEY = "stock-auth-v1";
 
-// Staff accounts. Add, remove, or edit entries here — each staff member gets
-// their own name + password. There's no backend, so this list only lives in
-// the deployed code (edit it and redeploy to change accounts).
-const STAFF_ACCOUNTS: { name: string; password: string }[] = [
-  { name: "Admin", password: "sevenmart2024" },
-  { name: "Staff 1", password: "staff1pass" },
-  { name: "Staff 2", password: "staff2pass" },
-];
+// Local fallback admin login, used only when Supabase isn't configured (no
+// database to store real accounts in). Once Supabase is set up, accounts
+// live in the `staff_accounts` table — see supabase/schema.sql — and staff
+// can be created/deleted/reset from the "Staff" panel in the app.
+const FALLBACK_ADMIN = { email: "siyante003@gmail.com", password: "229022#" };
 
 type CountState = Record<string, number>;
 type InventoryState = Record<string, Item>;
+type StaffAccount = { id: string; email: string; name: string; role: "admin" | "staff" };
+
+async function loginRequest(email: string, password: string): Promise<StaffAccount> {
+  const normalizedEmail = email.trim().toLowerCase();
+  if (supabaseEnabled && supabase) {
+    const { data, error } = await supabase.rpc("staff_login", {
+      p_email: normalizedEmail,
+      p_password: password,
+    });
+    if (error) throw new Error(error.message);
+    const row = (data as StaffAccount[] | null)?.[0];
+    if (!row) throw new Error("Incorrect email or password.");
+    return row;
+  }
+  if (normalizedEmail === FALLBACK_ADMIN.email && password === FALLBACK_ADMIN.password) {
+    return { id: "local-admin", email: FALLBACK_ADMIN.email, name: "Admin", role: "admin" };
+  }
+  throw new Error("Incorrect email or password.");
+}
 
 const pick = (row: Record<string, unknown>, keys: string[]) => {
   for (const k of Object.keys(row)) {
@@ -95,39 +112,133 @@ function Index() {
   const [customItems, setCustomItems] = useState<InventoryState>({});
   const [filter, setFilter] = useState<"all" | "pending" | "counted">("all");
   const [showAdd, setShowAdd] = useState(false);
+  const [showStaffPanel, setShowStaffPanel] = useState(false);
   const [loaded, setLoaded] = useState(false);
-  const [staffName, setStaffName] = useState<string | null>(null);
+  const [account, setAccount] = useState<StaffAccount | null>(null);
+  // In-memory only (never persisted) — lets admin actions in the staff
+  // panel skip re-prompting for a password within the same page session.
+  const [sessionPassword, setSessionPassword] = useState<string | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
 
   const items = useMemo<Item[]>(() => {
     return [...(inventory as Item[]), ...Object.values(customItems)];
   }, [customItems]);
 
+  // Initial load: from Supabase (shared, cross-device) when configured,
+  // otherwise from this browser's local storage only.
   useEffect(() => {
-    try {
-      const rawCounts = localStorage.getItem(STORAGE_KEY);
-      if (rawCounts) setCounts(JSON.parse(rawCounts));
-    } catch {
-      /* ignore */
+    async function load() {
+      if (supabaseEnabled && supabase) {
+        try {
+          const { data, error } = await supabase.from("stock_counts").select("item_id, qty");
+          if (error) throw error;
+          setCounts(Object.fromEntries((data ?? []).map((r) => [r.item_id as string, Number(r.qty)])));
+        } catch (err) {
+          console.error("Failed to load shared counts", err);
+        }
+        try {
+          const { data, error } = await supabase.from("stock_items").select("*");
+          if (error) throw error;
+          setCustomItems(
+            Object.fromEntries(
+              (data ?? []).map((r) => [
+                r.id as string,
+                {
+                  id: r.id as string,
+                  name: r.name as string,
+                  loc: (r.loc as string) ?? "",
+                  qty: Number(r.qty),
+                  cost: Number(r.cost),
+                  price: Number(r.price),
+                } satisfies Item,
+              ]),
+            ),
+          );
+        } catch (err) {
+          console.error("Failed to load shared items", err);
+        }
+      } else {
+        try {
+          const rawCounts = localStorage.getItem(STORAGE_KEY);
+          if (rawCounts) setCounts(JSON.parse(rawCounts));
+        } catch {
+          /* ignore */
+        }
+        try {
+          const rawItems = localStorage.getItem(INVENTORY_KEY);
+          if (rawItems) setCustomItems(JSON.parse(rawItems));
+        } catch {
+          /* ignore */
+        }
+      }
+
+      try {
+        const raw = localStorage.getItem(AUTH_KEY);
+        if (raw) setAccount(JSON.parse(raw) as StaffAccount);
+      } catch {
+        /* ignore */
+      }
+      setLoaded(true);
+      setAuthChecked(true);
     }
-    try {
-      const rawItems = localStorage.getItem(INVENTORY_KEY);
-      if (rawItems) setCustomItems(JSON.parse(rawItems));
-    } catch {
-      /* ignore */
-    }
-    try {
-      const rawName = localStorage.getItem(AUTH_KEY);
-      if (rawName && STAFF_ACCOUNTS.some((s) => s.name === rawName)) setStaffName(rawName);
-    } catch {
-      /* ignore */
-    }
-    setLoaded(true);
-    setAuthChecked(true);
+    load();
   }, []);
 
+  // Live sync: when Supabase is configured, push updates from other
+  // devices/staff into this session as soon as they happen.
   useEffect(() => {
-    if (!loaded) return;
+    if (!supabaseEnabled || !supabase) return;
+
+    const channel = supabase
+      .channel("stock-sync")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "stock_counts" },
+        (payload) => {
+          setCounts((c) => {
+            const next = { ...c };
+            if (payload.eventType === "DELETE") {
+              delete next[payload.old.item_id as string];
+            } else {
+              next[payload.new.item_id as string] = Number(payload.new.qty);
+            }
+            return next;
+          });
+        },
+      )
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "stock_items" },
+        (payload) => {
+          setCustomItems((prev) => {
+            const next = { ...prev };
+            if (payload.eventType === "DELETE") {
+              delete next[payload.old.id as string];
+            } else {
+              const r = payload.new;
+              next[r.id as string] = {
+                id: r.id as string,
+                name: r.name as string,
+                loc: (r.loc as string) ?? "",
+                qty: Number(r.qty),
+                cost: Number(r.cost),
+                price: Number(r.price),
+              };
+            }
+            return next;
+          });
+        },
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, []);
+
+  // Local-storage fallback persistence (only used when Supabase isn't configured).
+  useEffect(() => {
+    if (!loaded || supabaseEnabled) return;
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(counts));
     } catch (err) {
@@ -137,7 +248,7 @@ function Index() {
   }, [counts, loaded]);
 
   useEffect(() => {
-    if (!loaded) return;
+    if (!loaded || supabaseEnabled) return;
     try {
       localStorage.setItem(INVENTORY_KEY, JSON.stringify(customItems));
     } catch (err) {
@@ -145,6 +256,70 @@ function Index() {
       alert("Could not save your imported items — your device's storage may be full or unavailable.");
     }
   }, [customItems, loaded]);
+
+  const saveCount = async (itemId: string, qty: number) => {
+    setCounts((c) => ({ ...c, [itemId]: qty }));
+    if (supabaseEnabled && supabase) {
+      const { error } = await supabase
+        .from("stock_counts")
+        .upsert({ item_id: itemId, qty, counted_by: account?.email ?? null, updated_at: new Date().toISOString() });
+      if (error) {
+        console.error("Failed to save count", error);
+        alert("Could not save your count to the shared database — check your connection and try again.");
+      }
+    }
+  };
+
+  const clearCount = async (itemId: string) => {
+    setCounts((c) => {
+      const n = { ...c };
+      delete n[itemId];
+      return n;
+    });
+    if (supabaseEnabled && supabase) {
+      const { error } = await supabase.from("stock_counts").delete().eq("item_id", itemId);
+      if (error) {
+        console.error("Failed to clear count", error);
+        alert("Could not update the shared database — check your connection and try again.");
+      }
+    }
+  };
+
+  const resetAllCounts = async () => {
+    setCounts({});
+    if (supabaseEnabled && supabase) {
+      const { error } = await supabase.from("stock_counts").delete().neq("item_id", "");
+      if (error) {
+        console.error("Failed to reset counts", error);
+        alert("Could not reset the shared database — check your connection and try again.");
+      }
+    }
+  };
+
+  const addItems = async (newItems: Item[]) => {
+    setCustomItems((prev) => {
+      const next = { ...prev };
+      for (const it of newItems) next[it.id] = it;
+      return next;
+    });
+    if (supabaseEnabled && supabase) {
+      const { error } = await supabase.from("stock_items").upsert(
+        newItems.map((it) => ({
+          id: it.id,
+          name: it.name,
+          loc: it.loc,
+          qty: it.qty,
+          cost: it.cost,
+          price: it.price,
+          updated_at: new Date().toISOString(),
+        })),
+      );
+      if (error) {
+        console.error("Failed to save items", error);
+        alert("Could not save item(s) to the shared database — check your connection and try again.");
+      }
+    }
+  };
 
   const results = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -166,16 +341,17 @@ function Index() {
 
   if (!authChecked) return null;
 
-  if (!staffName) {
+  if (!account) {
     return (
       <LoginScreen
-        onSuccess={(name) => {
+        onSuccess={(acc, password) => {
           try {
-            localStorage.setItem(AUTH_KEY, name);
+            localStorage.setItem(AUTH_KEY, JSON.stringify(acc));
           } catch {
             /* ignore */
           }
-          setStaffName(name);
+          setAccount(acc);
+          setSessionPassword(password);
         }}
       />
     );
@@ -201,8 +377,19 @@ function Index() {
             </div>
             <div className="flex items-center gap-2">
               <span className="hidden text-xs text-muted-foreground sm:inline">
-                Hi, <span className="font-medium text-foreground">{staffName}</span>
+                Hi, <span className="font-medium text-foreground">{account.name}</span>
+                {account.role === "admin" && (
+                  <span className="ml-1.5 rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-semibold text-primary">
+                    Admin
+                  </span>
+                )}
               </span>
+              <button
+                onClick={() => setShowStaffPanel(true)}
+                className="rounded-lg border border-input px-3 py-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              >
+                Staff
+              </button>
               <button
                 onClick={() => {
                   if (confirm("Log out?")) {
@@ -211,7 +398,8 @@ function Index() {
                     } catch {
                       /* ignore */
                     }
-                    setStaffName(null);
+                    setAccount(null);
+                    setSessionPassword(null);
                   }
                 }}
                 className="rounded-lg border border-input px-3 py-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
@@ -267,11 +455,7 @@ function Index() {
                         alert("No rows found. Make sure the sheet has columns like Barcode/ID, Name, Qty.");
                         return;
                       }
-                      setCustomItems((prev) => {
-                        const next = { ...prev };
-                        for (const it of imported) next[it.id] = it;
-                        return next;
-                      });
+                      await addItems(imported);
                       alert(`Imported ${imported.length} items.`);
                     } catch (err) {
                       alert("Could not read that file. Please upload a valid Excel or CSV file.");
@@ -287,16 +471,23 @@ function Index() {
                 + Add item
               </button>
 
-              {staffName === "Admin" && (
-                <button
-                  onClick={() => {
-                    if (confirm("Clear all counted items?")) setCounts({});
-                  }}
-                  className="min-h-9 rounded-lg px-2.5 py-1.5 font-medium text-destructive transition-colors hover:bg-destructive/10"
-                >
-                  Reset count
-                </button>
-              )}
+              <button
+                onClick={() => {
+                  if (account.role !== "admin") {
+                    alert("Only an admin can reset the count.");
+                    return;
+                  }
+                  if (confirm("Clear all counted items?")) void resetAllCounts();
+                }}
+                title={account.role === "admin" ? undefined : "Admin only"}
+                className={`min-h-9 rounded-lg px-2.5 py-1.5 font-medium transition-colors ${
+                  account.role === "admin"
+                    ? "text-destructive hover:bg-destructive/10"
+                    : "cursor-not-allowed text-muted-foreground/50"
+                }`}
+              >
+                Reset count
+              </button>
             </div>
           </div>
         </div>
@@ -312,14 +503,8 @@ function Index() {
                 key={item.id}
                 item={item}
                 counted={counts[item.id]}
-                onSave={(v) => setCounts((c) => ({ ...c, [item.id]: v }))}
-                onClear={() =>
-                  setCounts((c) => {
-                    const n = { ...c };
-                    delete n[item.id];
-                    return n;
-                  })
-                }
+                onSave={(v) => void saveCount(item.id, v)}
+                onClear={() => void clearCount(item.id)}
               />
             ))}
           </ul>
@@ -335,9 +520,18 @@ function Index() {
         <AddItemModal
           onClose={() => setShowAdd(false)}
           onSave={(item) => {
-            setCustomItems((prev) => ({ ...prev, [item.id]: item }));
+            void addItems([item]);
             setShowAdd(false);
           }}
+        />
+      )}
+
+      {showStaffPanel && (
+        <StaffPanel
+          account={account}
+          sessionPassword={sessionPassword}
+          onVerified={(pw) => setSessionPassword(pw)}
+          onClose={() => setShowStaffPanel(false)}
         />
       )}
     </main>
@@ -543,18 +737,23 @@ function AddItemModal({
   );
 }
 
-function LoginScreen({ onSuccess }: { onSuccess: (name: string) => void }) {
-  const [name, setName] = useState(STAFF_ACCOUNTS[0]?.name ?? "");
+function LoginScreen({ onSuccess }: { onSuccess: (account: StaffAccount, password: string) => void }) {
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [error, setError] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const account = STAFF_ACCOUNTS.find((s) => s.name === name);
-    if (account && password === account.password) {
-      onSuccess(account.name);
-    } else {
-      setError(true);
+    setBusy(true);
+    setError(null);
+    try {
+      const account = await loginRequest(email, password);
+      onSuccess(account, password);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Incorrect email or password.");
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -566,46 +765,331 @@ function LoginScreen({ onSuccess }: { onSuccess: (name: string) => void }) {
             7M
           </div>
           <h1 className="mt-4 text-xl font-semibold tracking-tight text-foreground">Stock Count</h1>
-          <p className="mt-1 text-sm text-muted-foreground">Select your name and enter your password.</p>
+          <p className="mt-1 text-sm text-muted-foreground">Enter your email and password to continue.</p>
         </div>
         <form onSubmit={handleSubmit} className="mt-6 space-y-3">
-          <select
-            value={name}
-            onChange={(e) => {
-              setName(e.target.value);
-              setError(false);
-            }}
-            className="w-full rounded-xl border border-input bg-background px-4 py-3 text-base text-foreground outline-none focus:ring-2 focus:ring-ring"
-          >
-            {STAFF_ACCOUNTS.map((s) => (
-              <option key={s.name} value={s.name}>
-                {s.name}
-              </option>
-            ))}
-          </select>
           <input
             autoFocus
+            type="email"
+            value={email}
+            onChange={(e) => {
+              setEmail(e.target.value);
+              setError(null);
+            }}
+            placeholder="Email"
+            className={`w-full rounded-xl border bg-background px-4 py-3 text-base text-foreground outline-none placeholder:text-muted-foreground focus:ring-2 focus:ring-ring ${
+              error ? "border-destructive" : "border-input"
+            }`}
+          />
+          <input
             type="password"
-            inputMode="text"
             value={password}
             onChange={(e) => {
               setPassword(e.target.value);
-              setError(false);
+              setError(null);
             }}
             placeholder="Password"
             className={`w-full rounded-xl border bg-background px-4 py-3 text-base text-foreground outline-none placeholder:text-muted-foreground focus:ring-2 focus:ring-ring ${
               error ? "border-destructive" : "border-input"
             }`}
           />
-          {error && <p className="text-sm text-destructive">Incorrect password. Try again.</p>}
+          {error && <p className="text-sm text-destructive">{error}</p>}
           <button
             type="submit"
-            className="w-full rounded-xl bg-primary py-3 text-sm font-semibold text-primary-foreground shadow-sm transition-opacity hover:opacity-90"
+            disabled={busy}
+            className="w-full rounded-xl bg-primary py-3 text-sm font-semibold text-primary-foreground shadow-sm transition-opacity hover:opacity-90 disabled:opacity-60"
           >
-            Log in
+            {busy ? "Logging in…" : "Log in"}
           </button>
         </form>
       </div>
     </main>
+  );
+}
+
+function StaffPanel({
+  account,
+  sessionPassword,
+  onVerified,
+  onClose,
+}: {
+  account: StaffAccount;
+  sessionPassword: string | null;
+  onVerified: (password: string) => void;
+  onClose: () => void;
+}) {
+  const isAdmin = account.role === "admin";
+  const canManage = isAdmin && !!sessionPassword;
+
+  const [staff, setStaff] = useState<StaffAccount[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [confirmPw, setConfirmPw] = useState("");
+  const [confirmError, setConfirmError] = useState<string | null>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
+  const [showCreate, setShowCreate] = useState(false);
+
+  const refresh = async () => {
+    if (!supabaseEnabled || !supabase) return;
+    const { data, error } = await supabase.rpc("staff_list");
+    if (!error) setStaff((data ?? []) as StaffAccount[]);
+  };
+
+  useEffect(() => {
+    void refresh().finally(() => setLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handleConfirm = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setConfirmBusy(true);
+    setConfirmError(null);
+    try {
+      await loginRequest(account.email, confirmPw);
+      onVerified(confirmPw);
+    } catch {
+      setConfirmError("Incorrect password.");
+    } finally {
+      setConfirmBusy(false);
+    }
+  };
+
+  const handleDelete = async (target: StaffAccount) => {
+    if (!supabase || !sessionPassword) return;
+    if (target.id === account.id) {
+      alert("You can't delete your own account.");
+      return;
+    }
+    if (!confirm(`Delete ${target.name} (${target.email})?`)) return;
+    const { error } = await supabase.rpc("staff_delete_user", {
+      p_admin_email: account.email,
+      p_admin_password: sessionPassword,
+      p_target_id: target.id,
+    });
+    if (error) alert(error.message || "Could not delete that account.");
+    else void refresh();
+  };
+
+  const handleReset = async (target: StaffAccount) => {
+    if (!supabase || !sessionPassword) return;
+    const next = prompt(`New password for ${target.name}:`);
+    if (!next) return;
+    const { error } = await supabase.rpc("staff_reset_password", {
+      p_admin_email: account.email,
+      p_admin_password: sessionPassword,
+      p_target_id: target.id,
+      p_new_password: next,
+    });
+    if (error) alert(error.message || "Could not reset that password.");
+    else alert(`Password reset for ${target.name}.`);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 p-4 sm:items-center">
+      <div className="max-h-[85vh] w-full max-w-md overflow-y-auto rounded-2xl border border-border bg-card p-5 shadow-lg">
+        <div className="mb-4 flex items-center justify-between">
+          <h2 className="text-lg font-semibold text-foreground">Staff accounts</h2>
+          <button onClick={onClose} className="rounded-md p-1 text-muted-foreground hover:bg-muted" aria-label="Close">
+            ×
+          </button>
+        </div>
+
+        {!supabaseEnabled ? (
+          <p className="text-sm text-muted-foreground">
+            Connect Supabase (see .env) to manage staff accounts across devices.
+          </p>
+        ) : (
+          <>
+            {isAdmin && !canManage && (
+              <form onSubmit={handleConfirm} className="mb-4 space-y-2 rounded-xl border border-border bg-muted/40 p-3">
+                <p className="text-xs text-muted-foreground">
+                  Re-enter your password to create, delete, or reset staff.
+                </p>
+                <input
+                  type="password"
+                  autoFocus
+                  value={confirmPw}
+                  onChange={(e) => {
+                    setConfirmPw(e.target.value);
+                    setConfirmError(null);
+                  }}
+                  placeholder="Your password"
+                  className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground outline-none focus:ring-2 focus:ring-ring"
+                />
+                {confirmError && <p className="text-xs text-destructive">{confirmError}</p>}
+                <button
+                  type="submit"
+                  disabled={confirmBusy}
+                  className="rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground disabled:opacity-60"
+                >
+                  {confirmBusy ? "Checking…" : "Confirm"}
+                </button>
+              </form>
+            )}
+
+            {loading ? (
+              <p className="text-sm text-muted-foreground">Loading…</p>
+            ) : (
+              <ul className="space-y-2">
+                {staff.map((s) => (
+                  <li
+                    key={s.id}
+                    className="flex items-center justify-between gap-2 rounded-lg border border-border px-3 py-2"
+                  >
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-medium text-foreground">
+                        {s.name}
+                        {s.role === "admin" && (
+                          <span className="ml-1.5 rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-semibold text-primary">
+                            Admin
+                          </span>
+                        )}
+                      </p>
+                      <p className="truncate text-xs text-muted-foreground">{s.email}</p>
+                    </div>
+                    <div className="flex shrink-0 gap-1">
+                      <button
+                        disabled={!canManage}
+                        title={canManage ? "Reset password" : "Admin only"}
+                        onClick={() => void handleReset(s)}
+                        className={`rounded-lg border border-input px-2 py-1 text-xs ${
+                          canManage ? "text-foreground hover:bg-muted" : "cursor-not-allowed text-muted-foreground/50"
+                        }`}
+                      >
+                        Reset
+                      </button>
+                      <button
+                        disabled={!canManage}
+                        title={canManage ? "Delete account" : "Admin only"}
+                        onClick={() => void handleDelete(s)}
+                        className={`rounded-lg border border-input px-2 py-1 text-xs ${
+                          canManage
+                            ? "text-destructive hover:bg-destructive/10"
+                            : "cursor-not-allowed text-muted-foreground/50"
+                        }`}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            {canManage && (
+              <div className="mt-4 border-t border-border pt-4">
+                {showCreate ? (
+                  <CreateStaffForm
+                    account={account}
+                    sessionPassword={sessionPassword}
+                    onDone={() => {
+                      setShowCreate(false);
+                      void refresh();
+                    }}
+                    onCancel={() => setShowCreate(false)}
+                  />
+                ) : (
+                  <button
+                    onClick={() => setShowCreate(true)}
+                    className="w-full rounded-lg border border-dashed border-input py-2 text-sm font-medium text-primary hover:bg-primary/10"
+                  >
+                    + Create user
+                  </button>
+                )}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CreateStaffForm({
+  account,
+  sessionPassword,
+  onDone,
+  onCancel,
+}: {
+  account: StaffAccount;
+  sessionPassword: string;
+  onDone: () => void;
+  onCancel: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [role, setRole] = useState<"staff" | "admin">("staff");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!supabase) return;
+    setBusy(true);
+    setError(null);
+    const { error: rpcError } = await supabase.rpc("staff_create_user", {
+      p_admin_email: account.email,
+      p_admin_password: sessionPassword,
+      p_new_email: email.trim().toLowerCase(),
+      p_new_password: password,
+      p_new_name: name.trim(),
+      p_new_role: role,
+    });
+    setBusy(false);
+    if (rpcError) {
+      setError(rpcError.message.toLowerCase().includes("duplicate") ? "That email is already in use." : rpcError.message);
+      return;
+    }
+    onDone();
+  };
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-2">
+      <input
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        placeholder="Name"
+        required
+        className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground outline-none focus:ring-2 focus:ring-ring"
+      />
+      <input
+        type="email"
+        value={email}
+        onChange={(e) => setEmail(e.target.value)}
+        placeholder="Email"
+        required
+        className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground outline-none focus:ring-2 focus:ring-ring"
+      />
+      <input
+        type="password"
+        value={password}
+        onChange={(e) => setPassword(e.target.value)}
+        placeholder="Password"
+        required
+        minLength={6}
+        className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground outline-none focus:ring-2 focus:ring-ring"
+      />
+      <select
+        value={role}
+        onChange={(e) => setRole(e.target.value as "staff" | "admin")}
+        className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground outline-none focus:ring-2 focus:ring-ring"
+      >
+        <option value="staff">Staff</option>
+        <option value="admin">Admin</option>
+      </select>
+      {error && <p className="text-xs text-destructive">{error}</p>}
+      <div className="flex gap-2">
+        <button
+          type="submit"
+          disabled={busy}
+          className="flex-1 rounded-lg bg-primary py-2 text-sm font-medium text-primary-foreground disabled:opacity-60"
+        >
+          {busy ? "Creating…" : "Create"}
+        </button>
+        <button type="button" onClick={onCancel} className="rounded-lg border border-input px-3 py-2 text-sm text-foreground">
+          Cancel
+        </button>
+      </div>
+    </form>
   );
 }
