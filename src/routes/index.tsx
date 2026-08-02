@@ -121,7 +121,7 @@ function Index() {
   const [query, setQuery] = useState("");
   const [counts, setCounts] = useState<CountState>({});
   const [customItems, setCustomItems] = useState<InventoryState>({});
-  const [filter, setFilter] = useState<"all" | "pending" | "counted">("all");
+  const [filter, setFilter] = useState<"all" | "pending" | "counted" | "deleted">("all");
   const [showAdd, setShowAdd] = useState(false);
   const [showStaffPanel, setShowStaffPanel] = useState(false);
   const [loaded, setLoaded] = useState(false);
@@ -321,7 +321,9 @@ function Index() {
   const addItems = async (newItems: Item[]) => {
     setCustomItems((prev) => {
       const next = { ...prev };
-      for (const it of newItems) next[it.id] = it;
+      // Re-adding/re-importing an id that was previously deleted brings it
+      // back into the active list, same as hitting "Restore".
+      for (const it of newItems) next[it.id] = { ...it, deleted: false };
       return next;
     });
     if (supabaseEnabled && supabase) {
@@ -333,6 +335,7 @@ function Index() {
           qty: it.qty,
           cost: it.cost,
           price: it.price,
+          deleted: false,
           updated_at: new Date().toISOString(),
         })),
       );
@@ -343,55 +346,70 @@ function Index() {
     }
   };
 
+  // Soft delete: items are never actually removed from the database, just
+  // hidden from the normal list. Counts are left in place so restoring an
+  // item (from the "Deleted" filter) brings back its last counted qty too.
   const deleteItem = async (itemId: string) => {
     if (customItems[itemId]?.source === "base") return; // defense in depth — UI already hides this case
     setCustomItems((prev) => {
-      const next = { ...prev };
-      delete next[itemId];
-      return next;
-    });
-    setCounts((c) => {
-      const n = { ...c };
-      delete n[itemId];
-      return n;
+      const it = prev[itemId];
+      if (!it) return prev;
+      return { ...prev, [itemId]: { ...it, deleted: true } };
     });
     if (supabaseEnabled && supabase) {
-      const { error } = await supabase.from("stock_items").delete().eq("id", itemId).eq("source", "custom");
+      const { error } = await supabase
+        .from("stock_items")
+        .update({ deleted: true, updated_at: new Date().toISOString() })
+        .eq("id", itemId)
+        .eq("source", "custom");
       if (error) {
         console.error("Failed to delete item", error);
         alert("Could not delete that item from the shared database — check your connection and try again.");
       }
-      const { error: countError } = await supabase.from("stock_counts").delete().eq("item_id", itemId);
-      if (countError) console.error("Failed to delete count for item", countError);
     }
   };
 
-  // Clears everything added via "+ Add item" or Excel import — i.e. rows
-  // tagged source='custom'. Rows tagged source='base' (the original bundled
-  // catalog, now also stored in stock_items) are never touched by this.
+  const restoreItem = async (itemId: string) => {
+    setCustomItems((prev) => {
+      const it = prev[itemId];
+      if (!it) return prev;
+      return { ...prev, [itemId]: { ...it, deleted: false } };
+    });
+    if (supabaseEnabled && supabase) {
+      const { error } = await supabase
+        .from("stock_items")
+        .update({ deleted: false, updated_at: new Date().toISOString() })
+        .eq("id", itemId);
+      if (error) {
+        console.error("Failed to restore item", error);
+        alert("Could not restore that item in the shared database — check your connection and try again.");
+      }
+    }
+  };
+
+  // Soft-deletes everything added via "+ Add item" or Excel import — i.e.
+  // rows tagged source='custom'. Rows tagged source='base' (the original
+  // bundled catalog, now also stored in stock_items) are never touched by
+  // this. Deleted rows show up in the "Deleted" filter and can be restored
+  // individually.
   const deleteAllCustomItems = async () => {
     const ids = Object.entries(customItems)
-      .filter(([, it]) => it.source !== "base")
+      .filter(([, it]) => it.source !== "base" && !it.deleted)
       .map(([id]) => id);
     setCustomItems((prev) => {
       const next = { ...prev };
-      for (const id of ids) delete next[id];
+      for (const id of ids) next[id] = { ...next[id], deleted: true };
       return next;
     });
-    setCounts((c) => {
-      const n = { ...c };
-      for (const id of ids) delete n[id];
-      return n;
-    });
     if (supabaseEnabled && supabase) {
-      const { error } = await supabase.from("stock_items").delete().eq("source", "custom");
+      const { error } = await supabase
+        .from("stock_items")
+        .update({ deleted: true, updated_at: new Date().toISOString() })
+        .eq("source", "custom")
+        .eq("deleted", false);
       if (error) {
         console.error("Failed to delete all items", error);
         alert("Could not delete all items from the shared database — check your connection and try again.");
-      }
-      if (ids.length > 0) {
-        const { error: countError } = await supabase.from("stock_counts").delete().in("item_id", ids);
-        if (countError) console.error("Failed to delete counts for items", countError);
       }
     }
   };
