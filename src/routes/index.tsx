@@ -10,6 +10,9 @@ type Item = {
   qty: number;
   cost: number;
   price: number;
+  // "base" = part of the original bundled catalog, "custom" = added by staff.
+  // Only present when items are loaded from Supabase — see supabase/schema.sql.
+  source?: "base" | "custom";
 };
 
 const STORAGE_KEY = "stock-count-v1";
@@ -120,8 +123,15 @@ function Index() {
   const [sessionPassword, setSessionPassword] = useState<string | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
 
+  // When Supabase is configured, the whole catalog (base + added) lives in
+  // the `stock_items` table and is loaded into `customItems` below — the
+  // bundled inventory.json is only used as an offline/no-database fallback.
   const items = useMemo<Item[]>(() => {
-    return [...(inventory as Item[]), ...Object.values(customItems)];
+    if (supabaseEnabled) return Object.values(customItems);
+    return [
+      ...(inventory as Item[]).map((it) => ({ ...it, source: "base" as const })),
+      ...Object.values(customItems),
+    ];
   }, [customItems]);
 
   // Initial load: from Supabase (shared, cross-device) when configured,
@@ -150,6 +160,7 @@ function Index() {
                   qty: Number(r.qty),
                   cost: Number(r.cost),
                   price: Number(r.price),
+                  source: (r.source as "base" | "custom" | undefined) ?? "custom",
                 } satisfies Item,
               ]),
             ),

@@ -16,8 +16,17 @@ create table if not exists stock_items (
   qty numeric not null default 0,
   cost numeric not null default 0,
   price numeric not null default 0,
+  -- 'base' = part of the original bundled catalog, 'custom' = added by
+  -- staff (via "+ Add item" or Excel import). "Delete all items" in the
+  -- app only ever touches 'custom' rows, so the base catalog can't be
+  -- wiped by that bulk action.
+  source text not null default 'custom' check (source in ('base', 'custom')),
   updated_at timestamptz not null default now()
 );
+
+-- Safe to re-run on a database that already has stock_items without this column.
+alter table stock_items
+  add column if not exists source text not null default 'custom' check (source in ('base', 'custom'));
 
 -- Row Level Security: the app is already protected by its own staff login
 -- screen (not Supabase auth), so we allow the public "anon" key full access
