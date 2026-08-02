@@ -192,8 +192,12 @@ end;
 $$;
 
 -- Seed the admin account (safe to re-run — does nothing if it already exists).
+-- Uses a random-looking placeholder password on purpose: this file is committed to
+-- git (and this repo is public), so a real password must never be written here.
+-- Log in with this placeholder once, then immediately set a real password from the
+-- "Staff" panel (Reset) or via staff_reset_password().
 insert into staff_accounts (email, name, password_hash, role)
-values ('siyante003@gmail.com', 'Admin', extensions.crypt('229022#', extensions.gen_salt('bf')), 'admin')
+values ('siyante003@gmail.com', 'Admin', extensions.crypt('CHANGE-ME-IMMEDIATELY-AFTER-FIRST-LOGIN', extensions.gen_salt('bf')), 'admin')
 on conflict (email) do nothing;
 
 -- The table itself stays locked down; only these functions are callable.

@@ -13,6 +13,10 @@ type Item = {
   // "base" = part of the original bundled catalog, "custom" = added by staff.
   // Only present when items are loaded from Supabase — see supabase/schema.sql.
   source?: "base" | "custom";
+  // Soft-delete flag: "Delete item" / "Delete all items" set this instead of
+  // removing the row, so a deleted item can still be found (in the "Deleted"
+  // filter) and restored later without losing its counted qty.
+  deleted?: boolean;
 };
 
 const STORAGE_KEY = "stock-count-v1";
@@ -23,7 +27,11 @@ const AUTH_KEY = "stock-auth-v1";
 // database to store real accounts in). Once Supabase is set up, accounts
 // live in the `staff_accounts` table — see supabase/schema.sql — and staff
 // can be created/deleted/reset from the "Staff" panel in the app.
-const FALLBACK_ADMIN = { email: "siyante003@gmail.com", password: "229022#" };
+//
+// This file is committed to git (and this repo is public), so this must
+// never be a real account's password — it's a dead code path once Supabase
+// is configured, but still ships in the client bundle either way.
+const FALLBACK_ADMIN = { email: "siyante003@gmail.com", password: "HuujFC#pHgv5gdUxvkUA" };
 
 type CountState = Record<string, number>;
 type InventoryState = Record<string, Item>;
@@ -161,6 +169,7 @@ function Index() {
                   cost: Number(r.cost),
                   price: Number(r.price),
                   source: (r.source as "base" | "custom" | undefined) ?? "custom",
+                  deleted: (r.deleted as boolean | undefined) ?? false,
                 } satisfies Item,
               ]),
             ),
@@ -235,6 +244,7 @@ function Index() {
                 cost: Number(r.cost),
                 price: Number(r.price),
                 source: (r.source as "base" | "custom" | undefined) ?? "custom",
+                deleted: (r.deleted as boolean | undefined) ?? false,
               };
             }
             return next;
