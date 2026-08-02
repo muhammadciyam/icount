@@ -108,11 +108,23 @@ function Index() {
   }, []);
 
   useEffect(() => {
-    if (loaded) localStorage.setItem(STORAGE_KEY, JSON.stringify(counts));
+    if (!loaded) return;
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(counts));
+    } catch (err) {
+      console.error("Failed to save counts", err);
+      alert("Could not save your count — your device's storage may be full or unavailable.");
+    }
   }, [counts, loaded]);
 
   useEffect(() => {
-    if (loaded) localStorage.setItem(INVENTORY_KEY, JSON.stringify(customItems));
+    if (!loaded) return;
+    try {
+      localStorage.setItem(INVENTORY_KEY, JSON.stringify(customItems));
+    } catch (err) {
+      console.error("Failed to save imported items", err);
+      alert("Could not save your imported items — your device's storage may be full or unavailable.");
+    }
   }, [customItems, loaded]);
 
   const results = useMemo(() => {
