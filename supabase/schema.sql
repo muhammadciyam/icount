@@ -21,12 +21,19 @@ create table if not exists stock_items (
   -- app only ever touches 'custom' rows, so the base catalog can't be
   -- wiped by that bulk action.
   source text not null default 'custom' check (source in ('base', 'custom')),
+  -- Soft delete: "Delete item" / "Delete all items" in the app set this to
+  -- true instead of removing the row, so a deleted item stays in the
+  -- database (with its last counted qty in stock_counts) and can be
+  -- restored from the "Deleted" filter in the app.
+  deleted boolean not null default false,
   updated_at timestamptz not null default now()
 );
 
--- Safe to re-run on a database that already has stock_items without this column.
+-- Safe to re-run on a database that already has stock_items without these columns.
 alter table stock_items
   add column if not exists source text not null default 'custom' check (source in ('base', 'custom'));
+alter table stock_items
+  add column if not exists deleted boolean not null default false;
 
 -- Row Level Security: the app is already protected by its own staff login
 -- screen (not Supabase auth), so we allow the public "anon" key full access

@@ -142,6 +142,11 @@ function Index() {
     ];
   }, [customItems]);
 
+  // What the app treats as "the inventory" day to day — deleted items are
+  // kept in `items` (and the database) so the "Deleted" filter can still
+  // find them, but excluded everywhere else.
+  const activeItems = useMemo(() => items.filter((i) => !i.deleted), [items]);
+
   // Initial load: from Supabase (shared, cross-device) when configured,
   // otherwise from this browser's local storage only.
   useEffect(() => {
@@ -398,7 +403,10 @@ function Index() {
       .map(([id]) => id);
     setCustomItems((prev) => {
       const next = { ...prev };
-      for (const id of ids) next[id] = { ...next[id], deleted: true };
+      for (const id of ids) {
+        const it = next[id];
+        if (it) next[id] = { ...it, deleted: true };
+      }
       return next;
     });
     if (supabaseEnabled && supabase) {
@@ -416,7 +424,7 @@ function Index() {
 
   const results = useMemo(() => {
     const q = query.trim().toLowerCase();
-    let list = items;
+    let list = filter === "deleted" ? items.filter((i) => i.deleted) : activeItems;
     if (q) {
       const terms = q.split(/\s+/);
       list = list.filter((i) => {
@@ -427,10 +435,10 @@ function Index() {
     if (filter === "pending") list = list.filter((i) => counts[i.id] === undefined);
     if (filter === "counted") list = list.filter((i) => counts[i.id] !== undefined);
     return list.slice(0, 200);
-  }, [query, filter, counts]);
+  }, [query, filter, counts, items, activeItems]);
 
-  const done = Object.keys(counts).length;
-  const pct = Math.round((done / items.length) * 100);
+  const done = activeItems.filter((i) => counts[i.id] !== undefined).length;
+  const pct = activeItems.length === 0 ? 0 : Math.round((done / activeItems.length) * 100);
 
   if (!authChecked) return null;
 
@@ -464,7 +472,7 @@ function Index() {
                   Stock Count
                 </h1>
                 <p className="text-xs text-muted-foreground">
-                  {done} / {items.length} counted · {pct}%
+                  {done} / {activeItems.length} counted · {pct}%
                 </p>
               </div>
             </div>
@@ -517,7 +525,7 @@ function Index() {
           />
           <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex gap-1 rounded-lg border border-input p-1">
-              {(["all", "pending", "counted"] as const).map((f) => (
+              {(["all", "pending", "counted", "deleted"] as const).map((f) => (
                 <button
                   key={f}
                   onClick={() => setFilter(f)}
@@ -527,7 +535,7 @@ function Index() {
                       : "text-muted-foreground hover:text-foreground"
                   }`}
                 >
-                  {f === "all" ? "All" : f === "pending" ? "Not counted" : "Counted"}
+                  {f === "all" ? "All" : f === "pending" ? "Not counted" : f === "counted" ? "Counted" : "Deleted"}
                 </button>
               ))}
             </div>
@@ -588,13 +596,16 @@ function Index() {
                     alert("Only an admin can delete all items.");
                     return;
                   }
-                  if (Object.keys(customItems).length === 0) {
+                  const activeCustomCount = Object.values(customItems).filter(
+                    (it) => it.source !== "base" && !it.deleted,
+                  ).length;
+                  if (activeCustomCount === 0) {
                     alert("No added/imported items to delete.");
                     return;
                   }
                   if (
                     confirm(
-                      `Delete all ${Object.keys(customItems).length} added/imported item(s)? The base inventory list isn't affected.`,
+                      `Delete all ${activeCustomCount} added/imported item(s)? The base inventory list isn't affected. Deleted items can be restored from the "Deleted" filter.`,
                     )
                   ) {
                     void deleteAllCustomItems();
@@ -626,9 +637,11 @@ function Index() {
                 counted={counts[item.id]}
                 isCustom={item.source !== "base"}
                 isAdmin={account.role === "admin"}
+                isDeleted={!!item.deleted}
                 onSave={(v) => void saveCount(item.id, v)}
                 onClear={() => void clearCount(item.id)}
                 onDelete={() => void deleteItem(item.id)}
+                onRestore={() => void restoreItem(item.id)}
               />
             ))}
           </ul>
@@ -667,17 +680,21 @@ function Row({
   counted,
   isCustom,
   isAdmin,
+  isDeleted,
   onSave,
   onClear,
   onDelete,
+  onRestore,
 }: {
   item: Item;
   counted?: number | undefined;
   isCustom: boolean;
   isAdmin: boolean;
+  isDeleted: boolean;
   onSave: (v: number) => void;
   onClear: () => void;
   onDelete: () => void;
+  onRestore: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState("");
@@ -687,17 +704,26 @@ function Row({
   return (
     <li
       className={`overflow-hidden rounded-xl border transition-colors ${
-        isDone ? "border-primary/30 bg-primary/5" : "border-border bg-card"
+        isDeleted ? "border-border bg-muted/30 opacity-70" : isDone ? "border-primary/30 bg-primary/5" : "border-border bg-card"
       }`}
     >
       <div className="flex items-center gap-3 px-3 py-3">
         <button
           aria-label={isDone ? "Mark as not counted" : "Mark as counted"}
-          onClick={() => (isDone ? onClear() : setOpen((o) => !o))}
+          onClick={() => {
+            if (isDeleted || !isDone) {
+              setOpen((o) => !o);
+              return;
+            }
+            onClear();
+          }}
+          disabled={isDeleted}
           className={`flex size-8 shrink-0 items-center justify-center rounded-full border text-sm transition-colors ${
-            isDone
-              ? "border-primary bg-primary text-primary-foreground"
-              : "border-input text-muted-foreground"
+            isDeleted
+              ? "border-input text-muted-foreground/40"
+              : isDone
+                ? "border-primary bg-primary text-primary-foreground"
+                : "border-input text-muted-foreground"
           }`}
         >
           {isDone ? "✓" : ""}
@@ -725,61 +751,91 @@ function Row({
             <span>Cost: <span className="text-foreground">{item.cost.toFixed(3)}</span></span>
             <span>Sale price: <span className="text-foreground">{item.price.toFixed(2)}</span></span>
           </div>
-          <form
-            className="flex gap-2"
-            onSubmit={(e) => {
-              e.preventDefault();
-              const v = Number(draft);
-              if (draft.trim() === "" || Number.isNaN(v)) return;
-              onSave(v);
-              setDraft("");
-              setOpen(false);
-            }}
-          >
-            <input
-              type="number"
-              step="any"
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              placeholder="Counted qty"
-              className="flex-1 rounded-lg border border-input bg-background px-3 py-2 text-base text-foreground outline-none focus:ring-2 focus:ring-ring"
-            />
-            <button
-              type="submit"
-              className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground"
-            >
-              Save
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                onSave(item.qty);
-                setOpen(false);
-              }}
-              className="rounded-lg border border-input px-3 py-2 text-sm text-foreground"
-            >
-              Match
-            </button>
-          </form>
-          {isCustom && (
-            <button
-              type="button"
-              title={isAdmin ? undefined : "Admin only"}
-              onClick={() => {
-                if (!isAdmin) {
-                  alert("Only an admin can delete items.");
-                  return;
-                }
-                if (confirm(`Delete "${item.name}" from inventory?`)) onDelete();
-              }}
-              className={`w-full rounded-lg border px-3 py-2 text-sm font-medium transition-colors ${
-                isAdmin
-                  ? "border-destructive/40 text-destructive hover:bg-destructive/10"
-                  : "cursor-not-allowed border-input text-muted-foreground/50"
-              }`}
-            >
-              Delete item
-            </button>
+          {isDeleted ? (
+            <>
+              <p className="text-xs text-muted-foreground">
+                Deleted — still in the database with its last counted qty. Restore it to count or edit it again.
+              </p>
+              {isCustom && (
+                <button
+                  type="button"
+                  title={isAdmin ? undefined : "Admin only"}
+                  onClick={() => {
+                    if (!isAdmin) {
+                      alert("Only an admin can restore items.");
+                      return;
+                    }
+                    onRestore();
+                  }}
+                  className={`w-full rounded-lg border px-3 py-2 text-sm font-medium transition-colors ${
+                    isAdmin
+                      ? "border-primary/40 text-primary hover:bg-primary/10"
+                      : "cursor-not-allowed border-input text-muted-foreground/50"
+                  }`}
+                >
+                  Restore item
+                </button>
+              )}
+            </>
+          ) : (
+            <>
+              <form
+                className="flex gap-2"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const v = Number(draft);
+                  if (draft.trim() === "" || Number.isNaN(v)) return;
+                  onSave(v);
+                  setDraft("");
+                  setOpen(false);
+                }}
+              >
+                <input
+                  type="number"
+                  step="any"
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  placeholder="Counted qty"
+                  className="flex-1 rounded-lg border border-input bg-background px-3 py-2 text-base text-foreground outline-none focus:ring-2 focus:ring-ring"
+                />
+                <button
+                  type="submit"
+                  className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground"
+                >
+                  Save
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onSave(item.qty);
+                    setOpen(false);
+                  }}
+                  className="rounded-lg border border-input px-3 py-2 text-sm text-foreground"
+                >
+                  Match
+                </button>
+              </form>
+              {isCustom && (
+                <button
+                  type="button"
+                  title={isAdmin ? undefined : "Admin only"}
+                  onClick={() => {
+                    if (!isAdmin) {
+                      alert("Only an admin can delete items.");
+                      return;
+                    }
+                    if (confirm(`Delete "${item.name}" from inventory?`)) onDelete();
+                  }}
+                  className={`w-full rounded-lg border px-3 py-2 text-sm font-medium transition-colors ${
+                    isAdmin
+                      ? "border-destructive/40 text-destructive hover:bg-destructive/10"
+                      : "cursor-not-allowed border-input text-muted-foreground/50"
+                  }`}
+                >
+                  Delete item
+                </button>
+              )}
+            </>
           )}
         </div>
       )}
