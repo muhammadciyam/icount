@@ -41,16 +41,26 @@ alter table stock_items
 alter table stock_counts enable row level security;
 alter table stock_items enable row level security;
 
+drop policy if exists "anon full access" on stock_counts;
 create policy "anon full access" on stock_counts
   for all using (true) with check (true);
 
+drop policy if exists "anon full access" on stock_items;
 create policy "anon full access" on stock_items
   for all using (true) with check (true);
 
 -- Realtime: lets every open tab/device get pushed updates as soon as
 -- someone else counts an item or imports items.
-alter publication supabase_realtime add table stock_counts;
-alter publication supabase_realtime add table stock_items;
+do $$
+begin
+  alter publication supabase_realtime add table stock_counts;
+exception when duplicate_object then null;
+end $$;
+do $$
+begin
+  alter publication supabase_realtime add table stock_items;
+exception when duplicate_object then null;
+end $$;
 
 -- ============================================================
 -- Staff accounts: powers the login screen and the admin-only
