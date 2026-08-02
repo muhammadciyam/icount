@@ -1108,7 +1108,6 @@ function StaffPanel({
 
   useEffect(() => {
     void refresh().finally(() => setLoading(false));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleConfirm = async (e: React.FormEvent) => {
