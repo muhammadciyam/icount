@@ -3,14 +3,15 @@
 -- and turns on Realtime so all devices see updates instantly.
 
 create table if not exists stock_counts (
-  item_id text primary key,
+  item_id text not null,
   qty numeric not null,
   counted_by text,
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  primary key (item_id)
 );
 
 create table if not exists stock_items (
-  id text primary key,
+  id text not null,
   name text not null,
   loc text,
   qty numeric not null default 0,
@@ -26,7 +27,8 @@ create table if not exists stock_items (
   -- database (with its last counted qty in stock_counts) and can be
   -- restored from the "Deleted" filter in the app.
   deleted boolean not null default false,
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  primary key (id)
 );
 
 -- Safe to re-run on a database that already has stock_items without these columns.
@@ -34,6 +36,45 @@ alter table stock_items
   add column if not exists source text not null default 'custom' check (source in ('base', 'custom'));
 alter table stock_items
   add column if not exists deleted boolean not null default false;
+
+-- Outlets: every Excel upload is tagged with an outlet (branch) name, and
+-- outlets are tracked completely independently — the same barcode/id
+-- uploaded for two different outlets is two separate rows with their own
+-- qty/cost/price and their own counted qty, not one shared entry. The
+-- primary key is widened from just `id`/`item_id` to `(outlet, id)` /
+-- `(outlet, item_id)` to enforce that. Existing rows (all from the original
+-- single-outlet catalog) default to 'Seven Mart' so nothing already counted
+-- is lost or re-keyed.
+alter table stock_items add column if not exists outlet text not null default 'Seven Mart';
+alter table stock_counts add column if not exists outlet text not null default 'Seven Mart';
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'stock_items'::regclass and contype = 'p' and array_length(conkey, 1) = 2
+  ) then
+    execute (
+      select 'alter table stock_items drop constraint ' || quote_ident(conname)
+      from pg_constraint where conrelid = 'stock_items'::regclass and contype = 'p'
+    );
+    alter table stock_items add primary key (outlet, id);
+  end if;
+end $$;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'stock_counts'::regclass and contype = 'p' and array_length(conkey, 1) = 2
+  ) then
+    execute (
+      select 'alter table stock_counts drop constraint ' || quote_ident(conname)
+      from pg_constraint where conrelid = 'stock_counts'::regclass and contype = 'p'
+    );
+    alter table stock_counts add primary key (outlet, item_id);
+  end if;
+end $$;
 
 -- Row Level Security: the app is already protected by its own staff login
 -- screen (not Supabase auth), so we allow the public "anon" key full access

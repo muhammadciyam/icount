@@ -10,6 +10,11 @@ type Item = {
   qty: number;
   cost: number;
   price: number;
+  // Outlet/branch this item's inventory belongs to. Every upload is tagged
+  // with an outlet name, and outlets are tracked completely independently —
+  // the same barcode uploaded for two outlets is two separate rows with
+  // their own qty and their own counted qty (see keyOf() below).
+  outlet: string;
   // "base" = part of the original bundled catalog, "custom" = added by staff.
   // Only present when items are loaded from Supabase — see supabase/schema.sql.
   source?: "base" | "custom";
@@ -22,6 +27,35 @@ type Item = {
 const STORAGE_KEY = "stock-count-v1";
 const INVENTORY_KEY = "stock-inventory-v1";
 const AUTH_KEY = "stock-auth-v1";
+const LAST_OUTLET_KEY = "stock-last-outlet-v1";
+const SELECTED_OUTLET_KEY = "stock-selected-outlet-v1";
+const DEFAULT_OUTLET = "Seven Mart";
+
+// Sentinel for "don't filter by outlet" — never a real outlet name.
+const ALL_OUTLETS = "__all_outlets__";
+
+// Items/counts are keyed by outlet+id together (not just id) so the same
+// barcode in two different outlets is tracked as two fully independent
+// rows — separate qty, separate counted qty.
+const SEP = "";
+const keyOf = (outlet: string, id: string) => `${outlet}${SEP}${id}`;
+const outletOfKey = (key: string) => key.slice(0, key.indexOf(SEP));
+
+function getLastOutlet(): string {
+  try {
+    return localStorage.getItem(LAST_OUTLET_KEY) ?? DEFAULT_OUTLET;
+  } catch {
+    return DEFAULT_OUTLET;
+  }
+}
+
+function setLastOutlet(outlet: string) {
+  try {
+    localStorage.setItem(LAST_OUTLET_KEY, outlet);
+  } catch {
+    /* ignore */
+  }
+}
 
 // Local fallback admin login, used only when Supabase isn't configured (no
 // database to store real accounts in). Once Supabase is set up, accounts
@@ -68,7 +102,7 @@ const num = (v: unknown) => {
   return Number.isFinite(n) ? n : 0;
 };
 
-async function parseSheet(file: File): Promise<Item[]> {
+async function parseSheet(file: File, outlet: string): Promise<Item[]> {
   const XLSX = await import("xlsx");
   const buf = await file.arrayBuffer();
   const wb = XLSX.read(buf, { type: "array" });
@@ -90,9 +124,36 @@ async function parseSheet(file: File): Promise<Item[]> {
       qty: num(pick(row, ["qty", "quantity", "stock", "systemqty", "onhand", "balance"])),
       cost: num(pick(row, ["cost", "costprice", "purchaseprice", "buyprice"])),
       price: num(pick(row, ["price", "sellprice", "sellingprice", "retailprice", "unitprice"])),
+      outlet,
     });
   });
   return out;
+}
+
+// Fetches every row of a table, paging past Supabase/PostgREST's default
+// 1000-row response cap (a plain `.select("*")` silently truncates at 1000
+// even when the table has far more rows — this is what previously made
+// large uploads (thousands of items) appear incomplete in the app).
+async function fetchAllRows<T>(
+  client: NonNullable<typeof supabase>,
+  table: string,
+  columns: string,
+  orderBy: string[],
+): Promise<T[]> {
+  const pageSize = 1000;
+  const all: T[] = [];
+  let from = 0;
+  for (;;) {
+    let q = client.from(table).select(columns).range(from, from + pageSize - 1);
+    for (const col of orderBy) q = q.order(col, { ascending: true });
+    const { data, error } = await q;
+    if (error) throw error;
+    const rows = (data ?? []) as T[];
+    all.push(...rows);
+    if (rows.length < pageSize) break;
+    from += pageSize;
+  }
+  return all;
 }
 
 
@@ -123,6 +184,7 @@ function Index() {
   const [customItems, setCustomItems] = useState<InventoryState>({});
   const [filter, setFilter] = useState<"all" | "pending" | "counted" | "deleted">("all");
   const [showAdd, setShowAdd] = useState(false);
+  const [addOutlet, setAddOutlet] = useState(DEFAULT_OUTLET);
   const [editingItem, setEditingItem] = useState<Item | null>(null);
   const [showStaffPanel, setShowStaffPanel] = useState(false);
   const [loaded, setLoaded] = useState(false);
@@ -131,6 +193,18 @@ function Index() {
   // panel skip re-prompting for a password within the same page session.
   const [sessionPassword, setSessionPassword] = useState<string | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
+  // Which outlet's inventory is currently in view. ALL_OUTLETS shows every
+  // outlet together (with an outlet badge per row); admin actions that
+  // mutate data (reset counts / delete inventory) require a specific
+  // outlet to be picked first, so a bulk action never silently hits every
+  // outlet at once.
+  const [selectedOutlet, setSelectedOutlet] = useState<string>(() => {
+    try {
+      return localStorage.getItem(SELECTED_OUTLET_KEY) ?? ALL_OUTLETS;
+    } catch {
+      return ALL_OUTLETS;
+    }
+  });
 
   // When Supabase is configured, the whole catalog (base + added) lives in
   // the `stock_items` table and is loaded into `customItems` below — the
@@ -138,7 +212,11 @@ function Index() {
   const items = useMemo<Item[]>(() => {
     if (supabaseEnabled) return Object.values(customItems);
     return [
-      ...(inventory as Item[]).map((it) => ({ ...it, source: "base" as const })),
+      ...(inventory as Omit<Item, "outlet">[]).map((it) => ({
+        ...it,
+        outlet: DEFAULT_OUTLET,
+        source: "base" as const,
+      })),
       ...Object.values(customItems),
     ];
   }, [customItems]);
@@ -148,36 +226,68 @@ function Index() {
   // find them, but excluded everywhere else.
   const activeItems = useMemo(() => items.filter((i) => !i.deleted), [items]);
 
+  // Every outlet name seen across all loaded items, for the outlet picker.
+  const outlets = useMemo(
+    () => Array.from(new Set(items.map((i) => i.outlet).filter(Boolean))).sort(),
+    [items],
+  );
+
+  const selectOutlet = (outlet: string) => {
+    setSelectedOutlet(outlet);
+    try {
+      localStorage.setItem(SELECTED_OUTLET_KEY, outlet);
+    } catch {
+      /* ignore */
+    }
+  };
+
   // Initial load: from Supabase (shared, cross-device) when configured,
   // otherwise from this browser's local storage only.
   useEffect(() => {
     async function load() {
       if (supabaseEnabled && supabase) {
         try {
-          const { data, error } = await supabase.from("stock_counts").select("item_id, qty");
-          if (error) throw error;
-          setCounts(Object.fromEntries((data ?? []).map((r) => [r.item_id as string, Number(r.qty)])));
+          // .select() alone caps out at 1000 rows (Supabase/PostgREST's
+          // default page size) — fetchAllRows pages past that so every
+          // uploaded row is actually loaded, however many there are.
+          const rows = await fetchAllRows<{ item_id: string; qty: number; outlet: string }>(
+            supabase,
+            "stock_counts",
+            "item_id, qty, outlet",
+            ["outlet", "item_id"],
+          );
+          setCounts(
+            Object.fromEntries(
+              rows.map((r) => [keyOf(r.outlet ?? DEFAULT_OUTLET, r.item_id), Number(r.qty)]),
+            ),
+          );
         } catch (err) {
           console.error("Failed to load shared counts", err);
         }
         try {
-          const { data, error } = await supabase.from("stock_items").select("*");
-          if (error) throw error;
+          const rows = await fetchAllRows<Record<string, unknown>>(
+            supabase,
+            "stock_items",
+            "*",
+            ["outlet", "id"],
+          );
           setCustomItems(
             Object.fromEntries(
-              (data ?? []).map((r) => [
-                r.id as string,
-                {
-                  id: r.id as string,
-                  name: r.name as string,
-                  loc: (r.loc as string) ?? "",
-                  qty: Number(r.qty),
-                  cost: Number(r.cost),
-                  price: Number(r.price),
-                  source: (r.source as "base" | "custom" | undefined) ?? "custom",
-                  deleted: (r.deleted as boolean | undefined) ?? false,
-                } satisfies Item,
-              ]),
+              rows.map((r) => {
+                const outlet = (r["outlet"] as string | undefined) ?? DEFAULT_OUTLET;
+                const item: Item = {
+                  id: r["id"] as string,
+                  name: r["name"] as string,
+                  loc: (r["loc"] as string) ?? "",
+                  qty: Number(r["qty"]),
+                  cost: Number(r["cost"]),
+                  price: Number(r["price"]),
+                  outlet,
+                  source: (r["source"] as "base" | "custom" | undefined) ?? "custom",
+                  deleted: (r["deleted"] as boolean | undefined) ?? false,
+                };
+                return [keyOf(outlet, item.id), item];
+              }),
             ),
           );
         } catch (err) {
@@ -225,9 +335,13 @@ function Index() {
           setCounts((c) => {
             const next = { ...c };
             if (payload.eventType === "DELETE") {
-              delete next[payload.old["item_id"] as string];
+              const old = payload.old;
+              delete next[keyOf((old["outlet"] as string) ?? DEFAULT_OUTLET, old["item_id"] as string)];
             } else {
-              next[payload.new["item_id"] as string] = Number(payload.new["qty"]);
+              const r = payload.new;
+              next[keyOf((r["outlet"] as string) ?? DEFAULT_OUTLET, r["item_id"] as string)] = Number(
+                r["qty"],
+              );
             }
             return next;
           });
@@ -240,16 +354,19 @@ function Index() {
           setCustomItems((prev) => {
             const next = { ...prev };
             if (payload.eventType === "DELETE") {
-              delete next[payload.old["id"] as string];
+              const old = payload.old;
+              delete next[keyOf((old["outlet"] as string) ?? DEFAULT_OUTLET, old["id"] as string)];
             } else {
               const r = payload.new;
-              next[r["id"] as string] = {
+              const outlet = (r["outlet"] as string) ?? DEFAULT_OUTLET;
+              next[keyOf(outlet, r["id"] as string)] = {
                 id: r["id"] as string,
                 name: r["name"] as string,
                 loc: (r["loc"] as string) ?? "",
                 qty: Number(r["qty"]),
                 cost: Number(r["cost"]),
                 price: Number(r["price"]),
+                outlet,
                 source: (r["source"] as "base" | "custom" | undefined) ?? "custom",
                 deleted: (r["deleted"] as boolean | undefined) ?? false,
               };
@@ -286,12 +403,16 @@ function Index() {
     }
   }, [customItems, loaded]);
 
-  const saveCount = async (itemId: string, qty: number) => {
-    setCounts((c) => ({ ...c, [itemId]: qty }));
+  const saveCount = async (outlet: string, itemId: string, qty: number) => {
+    const k = keyOf(outlet, itemId);
+    setCounts((c) => ({ ...c, [k]: qty }));
     if (supabaseEnabled && supabase) {
       const { error } = await supabase
         .from("stock_counts")
-        .upsert({ item_id: itemId, qty, counted_by: account?.email ?? null, updated_at: new Date().toISOString() });
+        .upsert(
+          { outlet, item_id: itemId, qty, counted_by: account?.email ?? null, updated_at: new Date().toISOString() },
+          { onConflict: "outlet,item_id" },
+        );
       if (error) {
         console.error("Failed to save count", error);
         alert("Could not save your count to the shared database — check your connection and try again.");
@@ -299,14 +420,15 @@ function Index() {
     }
   };
 
-  const clearCount = async (itemId: string) => {
+  const clearCount = async (outlet: string, itemId: string) => {
+    const k = keyOf(outlet, itemId);
     setCounts((c) => {
       const n = { ...c };
-      delete n[itemId];
+      delete n[k];
       return n;
     });
     if (supabaseEnabled && supabase) {
-      const { error } = await supabase.from("stock_counts").delete().eq("item_id", itemId);
+      const { error } = await supabase.from("stock_counts").delete().eq("outlet", outlet).eq("item_id", itemId);
       if (error) {
         console.error("Failed to clear count", error);
         alert("Could not update the shared database — check your connection and try again.");
@@ -314,10 +436,13 @@ function Index() {
     }
   };
 
-  const resetAllCounts = async () => {
-    setCounts({});
+  // Scoped to a single outlet on purpose — an admin must pick a specific
+  // outlet before this is callable (see the "Reset count" button), so a
+  // bulk reset never wipes every outlet's counts at once.
+  const resetAllCounts = async (outlet: string) => {
+    setCounts((c) => Object.fromEntries(Object.entries(c).filter(([k]) => outletOfKey(k) !== outlet)));
     if (supabaseEnabled && supabase) {
-      const { error } = await supabase.from("stock_counts").delete().neq("item_id", "");
+      const { error } = await supabase.from("stock_counts").delete().eq("outlet", outlet);
       if (error) {
         console.error("Failed to reset counts", error);
         alert("Could not reset the shared database — check your connection and try again.");
@@ -325,30 +450,37 @@ function Index() {
     }
   };
 
+  // Batched so a single large Excel upload (thousands of rows) doesn't hit
+  // request-size/timeout limits in one giant upsert.
+  const UPSERT_BATCH_SIZE = 500;
+
   const addItems = async (newItems: Item[]) => {
     setCustomItems((prev) => {
       const next = { ...prev };
       // Re-adding/re-importing an id that was previously deleted brings it
       // back into the active list, same as hitting "Restore".
-      for (const it of newItems) next[it.id] = { ...it, deleted: false };
+      for (const it of newItems) next[keyOf(it.outlet, it.id)] = { ...it, deleted: false };
       return next;
     });
     if (supabaseEnabled && supabase) {
-      const { error } = await supabase.from("stock_items").upsert(
-        newItems.map((it) => ({
+      for (let i = 0; i < newItems.length; i += UPSERT_BATCH_SIZE) {
+        const batch = newItems.slice(i, i + UPSERT_BATCH_SIZE).map((it) => ({
           id: it.id,
           name: it.name,
           loc: it.loc,
           qty: it.qty,
           cost: it.cost,
           price: it.price,
+          outlet: it.outlet,
           deleted: false,
           updated_at: new Date().toISOString(),
-        })),
-      );
-      if (error) {
-        console.error("Failed to save items", error);
-        alert("Could not save item(s) to the shared database — check your connection and try again.");
+        }));
+        const { error } = await supabase.from("stock_items").upsert(batch, { onConflict: "outlet,id" });
+        if (error) {
+          console.error("Failed to save items", error);
+          alert("Could not save item(s) to the shared database — check your connection and try again.");
+          break;
+        }
       }
     }
   };
@@ -356,12 +488,14 @@ function Index() {
   // Edits an existing custom item's own details (name/location/system qty/
   // cost/price) — not to be confused with saveCount, which records what
   // staff *counted*. Restricted to custom rows, same as delete/restore, so
-  // the bundled base catalog stays read-only.
+  // the bundled base catalog stays read-only. Outlet is fixed at creation
+  // time and isn't editable here.
   const updateItem = async (updated: Item) => {
+    const k = keyOf(updated.outlet, updated.id);
     setCustomItems((prev) => {
-      const it = prev[updated.id];
+      const it = prev[k];
       if (!it || it.source === "base") return prev;
-      return { ...prev, [updated.id]: { ...it, ...updated } };
+      return { ...prev, [k]: { ...it, ...updated } };
     });
     if (supabaseEnabled && supabase) {
       const { error } = await supabase
@@ -374,6 +508,7 @@ function Index() {
           price: updated.price,
           updated_at: new Date().toISOString(),
         })
+        .eq("outlet", updated.outlet)
         .eq("id", updated.id)
         .eq("source", "custom");
       if (error) {
@@ -386,18 +521,20 @@ function Index() {
   // Soft delete: items are never actually removed from the database, just
   // hidden from the normal list. Counts are left in place so restoring an
   // item (from the "Deleted" filter) brings back its last counted qty too.
-  const deleteItem = async (itemId: string) => {
-    if (customItems[itemId]?.source === "base") return; // defense in depth — UI already hides this case
+  const deleteItem = async (item: Item) => {
+    if (item.source === "base") return; // defense in depth — UI already hides this case
+    const k = keyOf(item.outlet, item.id);
     setCustomItems((prev) => {
-      const it = prev[itemId];
+      const it = prev[k];
       if (!it) return prev;
-      return { ...prev, [itemId]: { ...it, deleted: true } };
+      return { ...prev, [k]: { ...it, deleted: true } };
     });
     if (supabaseEnabled && supabase) {
       const { error } = await supabase
         .from("stock_items")
         .update({ deleted: true, updated_at: new Date().toISOString() })
-        .eq("id", itemId)
+        .eq("outlet", item.outlet)
+        .eq("id", item.id)
         .eq("source", "custom");
       if (error) {
         console.error("Failed to delete item", error);
@@ -406,17 +543,19 @@ function Index() {
     }
   };
 
-  const restoreItem = async (itemId: string) => {
+  const restoreItem = async (item: Item) => {
+    const k = keyOf(item.outlet, item.id);
     setCustomItems((prev) => {
-      const it = prev[itemId];
+      const it = prev[k];
       if (!it) return prev;
-      return { ...prev, [itemId]: { ...it, deleted: false } };
+      return { ...prev, [k]: { ...it, deleted: false } };
     });
     if (supabaseEnabled && supabase) {
       const { error } = await supabase
         .from("stock_items")
         .update({ deleted: false, updated_at: new Date().toISOString() })
-        .eq("id", itemId);
+        .eq("outlet", item.outlet)
+        .eq("id", item.id);
       if (error) {
         console.error("Failed to restore item", error);
         alert("Could not restore that item in the shared database — check your connection and try again.");
@@ -424,20 +563,22 @@ function Index() {
     }
   };
 
-  // Soft-deletes everything added via "+ Add item" or Excel import — i.e.
-  // rows tagged source='custom'. Rows tagged source='base' (the original
-  // bundled catalog, now also stored in stock_items) are never touched by
-  // this. Deleted rows show up in the "Deleted" filter and can be restored
+  // Soft-deletes everything added via "+ Add item" or Excel import for one
+  // outlet — i.e. rows tagged source='custom' in that outlet. Rows tagged
+  // source='base' (the original bundled catalog) are never touched by
+  // this, and other outlets are untouched too: an admin must pick a
+  // specific outlet before this is callable (see "Delete all items").
+  // Deleted rows show up in the "Deleted" filter and can be restored
   // individually.
-  const deleteAllCustomItems = async () => {
-    const ids = Object.entries(customItems)
-      .filter(([, it]) => it.source !== "base" && !it.deleted)
-      .map(([id]) => id);
+  const deleteAllCustomItems = async (outlet: string) => {
+    const keys = Object.entries(customItems)
+      .filter(([, it]) => it.outlet === outlet && it.source !== "base" && !it.deleted)
+      .map(([k]) => k);
     setCustomItems((prev) => {
       const next = { ...prev };
-      for (const id of ids) {
-        const it = next[id];
-        if (it) next[id] = { ...it, deleted: true };
+      for (const k of keys) {
+        const it = next[k];
+        if (it) next[k] = { ...it, deleted: true };
       }
       return next;
     });
@@ -445,6 +586,7 @@ function Index() {
       const { error } = await supabase
         .from("stock_items")
         .update({ deleted: true, updated_at: new Date().toISOString() })
+        .eq("outlet", outlet)
         .eq("source", "custom")
         .eq("deleted", false);
       if (error) {
@@ -454,9 +596,20 @@ function Index() {
     }
   };
 
+  // Items scoped to whichever outlet is currently selected (or every
+  // outlet, when "All outlets" is picked) — used for the progress bar and
+  // as the base list the search box and filter tabs narrow further.
+  const outletScopedActiveItems = useMemo(
+    () => (selectedOutlet === ALL_OUTLETS ? activeItems : activeItems.filter((i) => i.outlet === selectedOutlet)),
+    [activeItems, selectedOutlet],
+  );
+
   const results = useMemo(() => {
     const q = query.trim().toLowerCase();
-    let list = filter === "deleted" ? items.filter((i) => i.deleted) : activeItems;
+    let list =
+      filter === "deleted"
+        ? items.filter((i) => i.deleted && (selectedOutlet === ALL_OUTLETS || i.outlet === selectedOutlet))
+        : outletScopedActiveItems;
     if (q) {
       const terms = q.split(/\s+/);
       list = list.filter((i) => {
@@ -464,13 +617,14 @@ function Index() {
         return terms.every((t) => hay.includes(t));
       });
     }
-    if (filter === "pending") list = list.filter((i) => counts[i.id] === undefined);
-    if (filter === "counted") list = list.filter((i) => counts[i.id] !== undefined);
-    return list.slice(0, 200);
-  }, [query, filter, counts, items, activeItems]);
+    if (filter === "pending") list = list.filter((i) => counts[keyOf(i.outlet, i.id)] === undefined);
+    if (filter === "counted") list = list.filter((i) => counts[keyOf(i.outlet, i.id)] !== undefined);
+    // No cap — every matching record is shown, however many there are.
+    return list;
+  }, [query, filter, counts, items, outletScopedActiveItems, selectedOutlet]);
 
-  const done = activeItems.filter((i) => counts[i.id] !== undefined).length;
-  const pct = activeItems.length === 0 ? 0 : Math.round((done / activeItems.length) * 100);
+  const done = outletScopedActiveItems.filter((i) => counts[keyOf(i.outlet, i.id)] !== undefined).length;
+  const pct = outletScopedActiveItems.length === 0 ? 0 : Math.round((done / outletScopedActiveItems.length) * 100);
 
   if (!authChecked) return null;
 
@@ -504,7 +658,8 @@ function Index() {
                   Stock Count
                 </h1>
                 <p className="text-xs text-muted-foreground">
-                  {done} / {activeItems.length} counted · {pct}%
+                  {done} / {outletScopedActiveItems.length} counted · {pct}%
+                  {selectedOutlet !== ALL_OUTLETS && ` · ${selectedOutlet}`}
                 </p>
               </div>
             </div>
@@ -555,6 +710,21 @@ function Index() {
             placeholder="Search item name or barcode / ID…"
             className="mt-3 w-full rounded-xl border border-input bg-background px-4 py-3.5 text-base text-foreground outline-none placeholder:text-muted-foreground focus:ring-2 focus:ring-ring sm:py-3"
           />
+          <label className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
+            <span className="shrink-0 font-medium">Outlet</span>
+            <select
+              value={selectedOutlet}
+              onChange={(e) => selectOutlet(e.target.value)}
+              className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground outline-none focus:ring-2 focus:ring-ring"
+            >
+              <option value={ALL_OUTLETS}>All outlets ({outlets.length})</option>
+              {outlets.map((o) => (
+                <option key={o} value={o}>
+                  {o}
+                </option>
+              ))}
+            </select>
+          </label>
           <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex gap-1 rounded-lg border border-input p-1">
               {(["all", "pending", "counted", "deleted"] as const).map((f) => (
@@ -582,14 +752,23 @@ function Index() {
                     const file = e.target.files?.[0];
                     e.target.value = "";
                     if (!file) return;
+                    const defaultOutlet = selectedOutlet !== ALL_OUTLETS ? selectedOutlet : getLastOutlet();
+                    const entered = prompt(
+                      "Outlet name for this upload (e.g. branch/store name):",
+                      defaultOutlet,
+                    );
+                    if (!entered || !entered.trim()) return;
+                    const outlet = entered.trim();
                     try {
-                      const imported = await parseSheet(file);
+                      const imported = await parseSheet(file, outlet);
                       if (imported.length === 0) {
                         alert("No rows found. Make sure the sheet has columns like Barcode/ID, Name, Qty.");
                         return;
                       }
                       await addItems(imported);
-                      alert(`Imported ${imported.length} items.`);
+                      setLastOutlet(outlet);
+                      selectOutlet(outlet);
+                      alert(`Imported ${imported.length} items into "${outlet}".`);
                     } catch (err) {
                       alert("Could not read that file. Please upload a valid Excel or CSV file.");
                       console.error(err);
@@ -598,7 +777,16 @@ function Index() {
                 />
               </label>
               <button
-                onClick={() => setShowAdd(true)}
+                onClick={() => {
+                  let outlet = selectedOutlet;
+                  if (outlet === ALL_OUTLETS) {
+                    const entered = prompt("Which outlet is this item for?", getLastOutlet());
+                    if (!entered || !entered.trim()) return;
+                    outlet = entered.trim();
+                  }
+                  setAddOutlet(outlet);
+                  setShowAdd(true);
+                }}
                 className="min-h-9 rounded-lg px-2.5 py-1.5 font-medium text-primary transition-colors hover:bg-primary/10"
               >
                 + Add item
@@ -610,7 +798,13 @@ function Index() {
                     alert("Only an admin can reset the count.");
                     return;
                   }
-                  if (confirm("Clear all counted items?")) void resetAllCounts();
+                  if (selectedOutlet === ALL_OUTLETS) {
+                    alert("Select an outlet first — counts are reset one outlet at a time.");
+                    return;
+                  }
+                  if (confirm(`Clear all counted items for "${selectedOutlet}"?`)) {
+                    void resetAllCounts(selectedOutlet);
+                  }
                 }}
                 title={account.role === "admin" ? undefined : "Admin only"}
                 className={`min-h-9 rounded-lg px-2.5 py-1.5 font-medium transition-colors ${
@@ -628,19 +822,23 @@ function Index() {
                     alert("Only an admin can delete all items.");
                     return;
                   }
+                  if (selectedOutlet === ALL_OUTLETS) {
+                    alert("Select an outlet first — inventory is deleted one outlet at a time.");
+                    return;
+                  }
                   const activeCustomCount = Object.values(customItems).filter(
-                    (it) => it.source !== "base" && !it.deleted,
+                    (it) => it.outlet === selectedOutlet && it.source !== "base" && !it.deleted,
                   ).length;
                   if (activeCustomCount === 0) {
-                    alert("No added/imported items to delete.");
+                    alert("No added/imported items to delete for this outlet.");
                     return;
                   }
                   if (
                     confirm(
-                      `Delete all ${activeCustomCount} added/imported item(s)? The base inventory list isn't affected. Deleted items can be restored from the "Deleted" filter.`,
+                      `Delete all ${activeCustomCount} added/imported item(s) in "${selectedOutlet}"? The base inventory list isn't affected. Deleted items can be restored from the "Deleted" filter.`,
                     )
                   ) {
-                    void deleteAllCustomItems();
+                    void deleteAllCustomItems(selectedOutlet);
                   }
                 }}
                 title={account.role === "admin" ? undefined : "Admin only"}
@@ -658,31 +856,31 @@ function Index() {
       </header>
 
       <div className="mx-auto max-w-3xl px-3 sm:px-6">
+        <p className="py-3 text-center text-xs text-muted-foreground">
+          Showing all {results.length.toLocaleString()} item{results.length === 1 ? "" : "s"}
+          {selectedOutlet === ALL_OUTLETS ? ` across ${outlets.length} outlet(s)` : ` in "${selectedOutlet}"`}
+        </p>
         {results.length === 0 ? (
           <p className="py-16 text-center text-sm text-muted-foreground">No items found.</p>
         ) : (
-          <ul className="mt-3 space-y-2">
+          <ul className="space-y-2">
             {results.map((item) => (
               <Row
-                key={item.id}
+                key={keyOf(item.outlet, item.id)}
                 item={item}
-                counted={counts[item.id]}
+                counted={counts[keyOf(item.outlet, item.id)]}
                 isCustom={item.source !== "base"}
                 isAdmin={account.role === "admin"}
                 isDeleted={!!item.deleted}
-                onSave={(v) => void saveCount(item.id, v)}
-                onClear={() => void clearCount(item.id)}
+                showOutlet={selectedOutlet === ALL_OUTLETS}
+                onSave={(v) => void saveCount(item.outlet, item.id, v)}
+                onClear={() => void clearCount(item.outlet, item.id)}
                 onEdit={() => setEditingItem(item)}
-                onDelete={() => void deleteItem(item.id)}
-                onRestore={() => void restoreItem(item.id)}
+                onDelete={() => void deleteItem(item)}
+                onRestore={() => void restoreItem(item)}
               />
             ))}
           </ul>
-        )}
-        {results.length === 200 && (
-          <p className="py-4 text-center text-xs text-muted-foreground">
-            Showing first 200 matches — refine your search.
-          </p>
         )}
       </div>
 
@@ -690,6 +888,7 @@ function Index() {
         <ItemFormModal
           title="Add new item"
           submitLabel="Save item"
+          outlet={addOutlet}
           onClose={() => setShowAdd(false)}
           onSave={(item) => {
             void addItems([item]);
@@ -702,6 +901,7 @@ function Index() {
         <ItemFormModal
           title="Edit item"
           submitLabel="Save changes"
+          outlet={editingItem.outlet}
           initial={editingItem}
           onClose={() => setEditingItem(null)}
           onSave={(item) => {
@@ -729,6 +929,7 @@ function Row({
   isCustom,
   isAdmin,
   isDeleted,
+  showOutlet,
   onSave,
   onClear,
   onEdit,
@@ -740,6 +941,7 @@ function Row({
   isCustom: boolean;
   isAdmin: boolean;
   isDeleted: boolean;
+  showOutlet: boolean;
   onSave: (v: number) => void;
   onClear: () => void;
   onEdit: () => void;
@@ -779,7 +981,14 @@ function Row({
           {isDone ? "✓" : ""}
         </button>
         <button onClick={() => setOpen((o) => !o)} className="min-w-0 flex-1 text-left">
-          <p className="truncate text-sm font-medium text-foreground">{item.name}</p>
+          <p className="flex items-center gap-1.5 truncate text-sm font-medium text-foreground">
+            {showOutlet && (
+              <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground">
+                {item.outlet}
+              </span>
+            )}
+            <span className="truncate">{item.name}</span>
+          </p>
           <p className="text-xs text-muted-foreground">
             #{item.id} · system {item.qty} · MVR {item.price.toFixed(2)}
             {isDone && (
@@ -796,6 +1005,7 @@ function Row({
       {open && (
         <div className="space-y-3 border-t border-border bg-muted/40 px-3 py-3">
           <div className="grid grid-cols-2 gap-2 text-xs text-muted-foreground">
+            <span>Outlet: <span className="text-foreground">{item.outlet}</span></span>
             <span>Location: <span className="text-foreground">{item.loc}</span></span>
             <span>System qty: <span className="text-foreground">{item.qty}</span></span>
             <span>Cost: <span className="text-foreground">{item.cost.toFixed(3)}</span></span>
@@ -905,12 +1115,17 @@ function Row({
 function ItemFormModal({
   title,
   submitLabel,
+  outlet,
   initial,
   onClose,
   onSave,
 }: {
   title: string;
   submitLabel: string;
+  // Outlet this item belongs to. Fixed for the lifetime of the modal — set
+  // once (from the outlet picker, or a prompt) before it opens, and not
+  // editable here, since items are keyed by outlet+id together.
+  outlet: string;
   initial?: Item;
   onClose: () => void;
   onSave: (item: Item) => void;
@@ -931,6 +1146,7 @@ function ItemFormModal({
     onSave({
       ...initial,
       id: initial?.id ?? `custom-${Date.now()}`,
+      outlet,
       name: n,
       loc: loc.trim() || "N/A",
       qty: qNum,
@@ -943,7 +1159,10 @@ function ItemFormModal({
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 p-4 sm:items-center">
       <div className="w-full max-w-md rounded-2xl border border-border bg-card p-5 shadow-lg">
         <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-foreground">{title}</h2>
+          <div>
+            <h2 className="text-lg font-semibold text-foreground">{title}</h2>
+            <p className="text-xs text-muted-foreground">Outlet: {outlet}</p>
+          </div>
           <button
             onClick={onClose}
             className="rounded-md p-1 text-muted-foreground hover:bg-muted"
