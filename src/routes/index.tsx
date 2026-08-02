@@ -13,6 +13,16 @@ type Item = {
 
 const STORAGE_KEY = "stock-count-v1";
 const INVENTORY_KEY = "stock-inventory-v1";
+const AUTH_KEY = "stock-auth-v1";
+
+// Staff accounts. Add, remove, or edit entries here — each staff member gets
+// their own name + password. There's no backend, so this list only lives in
+// the deployed code (edit it and redeploy to change accounts).
+const STAFF_ACCOUNTS: { name: string; password: string }[] = [
+  { name: "Admin", password: "sevenmart2024" },
+  { name: "Staff 1", password: "staff1pass" },
+  { name: "Staff 2", password: "staff2pass" },
+];
 
 type CountState = Record<string, number>;
 type InventoryState = Record<string, Item>;
@@ -86,6 +96,8 @@ function Index() {
   const [filter, setFilter] = useState<"all" | "pending" | "counted">("all");
   const [showAdd, setShowAdd] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [staffName, setStaffName] = useState<string | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
 
   const items = useMemo<Item[]>(() => {
     return [...(inventory as Item[]), ...Object.values(customItems)];
@@ -104,7 +116,14 @@ function Index() {
     } catch {
       /* ignore */
     }
+    try {
+      const rawName = localStorage.getItem(AUTH_KEY);
+      if (rawName && STAFF_ACCOUNTS.some((s) => s.name === rawName)) setStaffName(rawName);
+    } catch {
+      /* ignore */
+    }
     setLoaded(true);
+    setAuthChecked(true);
   }, []);
 
   useEffect(() => {
@@ -145,18 +164,67 @@ function Index() {
   const done = Object.keys(counts).length;
   const pct = Math.round((done / items.length) * 100);
 
+  if (!authChecked) return null;
+
+  if (!staffName) {
+    return (
+      <LoginScreen
+        onSuccess={(name) => {
+          try {
+            localStorage.setItem(AUTH_KEY, name);
+          } catch {
+            /* ignore */
+          }
+          setStaffName(name);
+        }}
+      />
+    );
+  }
+
   return (
     <main className="min-h-screen bg-background pb-24">
-      <header className="sticky top-0 z-10 border-b border-border bg-card/95 backdrop-blur">
-        <div className="mx-auto max-w-3xl px-4 py-4">
-          <div className="flex items-baseline justify-between gap-3">
-            <h1 className="text-lg font-semibold tracking-tight text-foreground">Stock Count</h1>
-            <span className="text-sm text-muted-foreground">
-              {done} / {items.length} counted ({pct}%)
-            </span>
+      <header className="sticky top-0 z-10 border-b border-border bg-card/95 shadow-sm backdrop-blur">
+        <div className="mx-auto max-w-3xl px-4 py-4 sm:px-6">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5">
+              <div className="flex size-9 items-center justify-center rounded-xl bg-primary text-base font-bold text-primary-foreground shadow-sm">
+                7M
+              </div>
+              <div>
+                <h1 className="text-base font-semibold leading-tight tracking-tight text-foreground sm:text-lg">
+                  Stock Count
+                </h1>
+                <p className="text-xs text-muted-foreground">
+                  {done} / {items.length} counted · {pct}%
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="hidden text-xs text-muted-foreground sm:inline">
+                Hi, <span className="font-medium text-foreground">{staffName}</span>
+              </span>
+              <button
+                onClick={() => {
+                  if (confirm("Log out?")) {
+                    try {
+                      localStorage.removeItem(AUTH_KEY);
+                    } catch {
+                      /* ignore */
+                    }
+                    setStaffName(null);
+                  }
+                }}
+                className="rounded-lg border border-input px-3 py-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              >
+                Log out
+              </button>
+            </div>
           </div>
-          <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-muted">
-            <div className="h-full bg-primary transition-all" style={{ width: `${pct}%` }} />
+          <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-muted">
+            <div
+              className="h-full rounded-full bg-primary transition-all duration-300"
+              style={{ width: `${pct}%` }}
+            />
           </div>
           <input
             autoFocus
@@ -164,15 +232,15 @@ function Index() {
             onChange={(e) => setQuery(e.target.value)}
             inputMode="search"
             placeholder="Search item name or barcode / ID…"
-            className="mt-3 w-full rounded-xl border border-input bg-background px-4 py-3 text-base text-foreground outline-none placeholder:text-muted-foreground focus:ring-2 focus:ring-ring"
+            className="mt-3 w-full rounded-xl border border-input bg-background px-4 py-3.5 text-base text-foreground outline-none placeholder:text-muted-foreground focus:ring-2 focus:ring-ring sm:py-3"
           />
-          <div className="mt-2 flex items-center justify-between text-sm">
-            <div className="flex gap-1 rounded-lg border border-input p-0.5">
+          <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex gap-1 rounded-lg border border-input p-1">
               {(["all", "pending", "counted"] as const).map((f) => (
                 <button
                   key={f}
                   onClick={() => setFilter(f)}
-                  className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
+                  className={`flex-1 rounded-md px-3 py-2 text-xs font-medium transition-colors sm:flex-none sm:px-2.5 sm:py-1 ${
                     filter === f
                       ? "bg-primary text-primary-foreground"
                       : "text-muted-foreground hover:text-foreground"
@@ -182,8 +250,8 @@ function Index() {
                 </button>
               ))}
             </div>
-            <div className="flex items-center gap-2">
-              <label className="cursor-pointer rounded-md px-2 py-1 text-primary hover:bg-primary/10">
+            <div className="flex flex-wrap items-center gap-2 text-sm">
+              <label className="flex min-h-9 cursor-pointer items-center rounded-lg px-2.5 py-1.5 font-medium text-primary transition-colors hover:bg-primary/10">
                 Import Excel
                 <input
                   type="file"
@@ -214,29 +282,31 @@ function Index() {
               </label>
               <button
                 onClick={() => setShowAdd(true)}
-                className="rounded-md px-2 py-1 text-primary hover:bg-primary/10"
+                className="min-h-9 rounded-lg px-2.5 py-1.5 font-medium text-primary transition-colors hover:bg-primary/10"
               >
                 + Add item
               </button>
 
-              <button
-                onClick={() => {
-                  if (confirm("Clear all counted items?")) setCounts({});
-                }}
-                className="rounded-md px-2 py-1 text-destructive hover:bg-destructive/10"
-              >
-                Reset count
-              </button>
+              {staffName === "Admin" && (
+                <button
+                  onClick={() => {
+                    if (confirm("Clear all counted items?")) setCounts({});
+                  }}
+                  className="min-h-9 rounded-lg px-2.5 py-1.5 font-medium text-destructive transition-colors hover:bg-destructive/10"
+                >
+                  Reset count
+                </button>
+              )}
             </div>
           </div>
         </div>
       </header>
 
-      <div className="mx-auto max-w-3xl px-4">
+      <div className="mx-auto max-w-3xl px-3 sm:px-6">
         {results.length === 0 ? (
           <p className="py-16 text-center text-sm text-muted-foreground">No items found.</p>
         ) : (
-          <ul className="divide-y divide-border">
+          <ul className="mt-3 space-y-2">
             {results.map((item) => (
               <Row
                 key={item.id}
@@ -291,12 +361,16 @@ function Row({
   const diff = isDone ? counted - item.qty : 0;
 
   return (
-    <li className={isDone ? "bg-accent/40" : undefined}>
-      <div className="flex items-center gap-3 px-1 py-3">
+    <li
+      className={`overflow-hidden rounded-xl border transition-colors ${
+        isDone ? "border-primary/30 bg-primary/5" : "border-border bg-card"
+      }`}
+    >
+      <div className="flex items-center gap-3 px-3 py-3">
         <button
           aria-label={isDone ? "Mark as not counted" : "Mark as counted"}
           onClick={() => (isDone ? onClear() : setOpen((o) => !o))}
-          className={`flex size-7 shrink-0 items-center justify-center rounded-full border text-sm ${
+          className={`flex size-8 shrink-0 items-center justify-center rounded-full border text-sm transition-colors ${
             isDone
               ? "border-primary bg-primary text-primary-foreground"
               : "border-input text-muted-foreground"
@@ -309,7 +383,7 @@ function Row({
           <p className="text-xs text-muted-foreground">
             #{item.id} · system {item.qty} · MVR {item.price.toFixed(2)}
             {isDone && (
-              <span className={diff === 0 ? " text-primary" : " text-destructive"}>
+              <span className={diff === 0 ? " font-medium text-primary" : " font-medium text-destructive"}>
                 {" "}
                 · counted {counted} ({diff > 0 ? "+" : ""}
                 {diff})
@@ -320,7 +394,7 @@ function Row({
       </div>
 
       {open && (
-        <div className="space-y-3 rounded-xl bg-muted/60 px-3 py-3">
+        <div className="space-y-3 border-t border-border bg-muted/40 px-3 py-3">
           <div className="grid grid-cols-2 gap-2 text-xs text-muted-foreground">
             <span>Location: <span className="text-foreground">{item.loc}</span></span>
             <span>System qty: <span className="text-foreground">{item.qty}</span></span>
@@ -466,5 +540,72 @@ function AddItemModal({
         </form>
       </div>
     </div>
+  );
+}
+
+function LoginScreen({ onSuccess }: { onSuccess: (name: string) => void }) {
+  const [name, setName] = useState(STAFF_ACCOUNTS[0]?.name ?? "");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState(false);
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const account = STAFF_ACCOUNTS.find((s) => s.name === name);
+    if (account && password === account.password) {
+      onSuccess(account.name);
+    } else {
+      setError(true);
+    }
+  };
+
+  return (
+    <main className="flex min-h-screen items-center justify-center bg-background px-4">
+      <div className="w-full max-w-sm rounded-2xl border border-border bg-card p-6 shadow-lg">
+        <div className="flex flex-col items-center text-center">
+          <div className="flex size-14 items-center justify-center rounded-2xl bg-primary text-xl font-bold text-primary-foreground shadow-sm">
+            7M
+          </div>
+          <h1 className="mt-4 text-xl font-semibold tracking-tight text-foreground">Stock Count</h1>
+          <p className="mt-1 text-sm text-muted-foreground">Select your name and enter your password.</p>
+        </div>
+        <form onSubmit={handleSubmit} className="mt-6 space-y-3">
+          <select
+            value={name}
+            onChange={(e) => {
+              setName(e.target.value);
+              setError(false);
+            }}
+            className="w-full rounded-xl border border-input bg-background px-4 py-3 text-base text-foreground outline-none focus:ring-2 focus:ring-ring"
+          >
+            {STAFF_ACCOUNTS.map((s) => (
+              <option key={s.name} value={s.name}>
+                {s.name}
+              </option>
+            ))}
+          </select>
+          <input
+            autoFocus
+            type="password"
+            inputMode="text"
+            value={password}
+            onChange={(e) => {
+              setPassword(e.target.value);
+              setError(false);
+            }}
+            placeholder="Password"
+            className={`w-full rounded-xl border bg-background px-4 py-3 text-base text-foreground outline-none placeholder:text-muted-foreground focus:ring-2 focus:ring-ring ${
+              error ? "border-destructive" : "border-input"
+            }`}
+          />
+          {error && <p className="text-sm text-destructive">Incorrect password. Try again.</p>}
+          <button
+            type="submit"
+            className="w-full rounded-xl bg-primary py-3 text-sm font-semibold text-primary-foreground shadow-sm transition-opacity hover:opacity-90"
+          >
+            Log in
+          </button>
+        </form>
+      </div>
+    </main>
   );
 }
