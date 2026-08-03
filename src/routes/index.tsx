@@ -1400,181 +1400,75 @@ function Row({
   const isDone = counted !== undefined;
   const diff = isDone ? counted - item.qty : 0;
 
-  // Swipe left reveals Delete (right edge), swipe right reveals Edit (left
-  // edge) — only for custom, non-deleted rows that aren't mid bulk-select.
-  // The reveal is a two-step interaction (swipe, then tap the revealed
-  // button, then confirm for delete) so it's no more accident-prone than
-  // the equivalent buttons in the expanded row below; it's just reachable
-  // one-handed without opening the row first.
-  const swipeEnabled = isCustom && !isDeleted && !selectMode;
-  const ACTION_WIDTH = 76;
-  const [dragX, setDragX] = useState(0);
-  const [swiping, setSwiping] = useState(false);
-  const dragRef = useRef<{ startX: number; startY: number; base: number; axis: "x" | "y" | null } | null>(null);
-
-  const closeSwipe = () => setDragX(0);
-
-  const onSwipePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!swipeEnabled) return;
-    dragRef.current = { startX: e.clientX, startY: e.clientY, base: dragX, axis: null };
-  };
-  const onSwipePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    const st = dragRef.current;
-    if (!st) return;
-    const dx = e.clientX - st.startX;
-    const dy = e.clientY - st.startY;
-    if (st.axis === null) {
-      if (Math.abs(dx) < 6 && Math.abs(dy) < 6) return;
-      st.axis = Math.abs(dx) > Math.abs(dy) ? "x" : "y";
-      if (st.axis === "x") {
-        setSwiping(true);
-        e.currentTarget.setPointerCapture(e.pointerId);
-      }
-    }
-    if (st.axis !== "x") return;
-    e.preventDefault();
-    setDragX(Math.max(-ACTION_WIDTH, Math.min(ACTION_WIDTH, st.base + dx)));
-  };
-  const endSwipeDrag = () => {
-    const st = dragRef.current;
-    dragRef.current = null;
-    setSwiping(false);
-    if (!st || st.axis !== "x") return;
-    setDragX((x) => (x > ACTION_WIDTH / 2 ? ACTION_WIDTH : x < -ACTION_WIDTH / 2 ? -ACTION_WIDTH : 0));
-  };
-
-  const borderClass = selected
-    ? "border-primary"
-    : isDeleted
-      ? "border-border"
-      : isDone
-        ? "border-primary/30"
-        : "border-border";
-  const bgClass = selected
-    ? "bg-primary/10"
-    : isDeleted
-      ? "bg-muted/30 opacity-70"
-      : isDone
-        ? "bg-primary/5"
-        : "bg-card";
-
   return (
-    <li className={`relative overflow-hidden rounded-xl border transition-colors ${borderClass}`}>
-      {swipeEnabled && (
-        <>
+    <li
+      className={`overflow-hidden rounded-xl border transition-colors ${
+        selected
+          ? "border-primary bg-primary/10"
+          : isDeleted
+            ? "border-border bg-muted/30 opacity-70"
+            : isDone
+              ? "border-primary/30 bg-primary/5"
+              : "border-border bg-card"
+      }`}
+    >
+      <div className="flex items-center gap-3 px-3 py-3">
+        {selectMode ? (
+          <input
+            type="checkbox"
+            aria-label={`Select ${item.name}`}
+            checked={selected}
+            onChange={onToggleSelect}
+            className="size-5 shrink-0 accent-primary"
+          />
+        ) : (
           <button
-            type="button"
-            tabIndex={-1}
-            aria-hidden="true"
+            aria-label={isDone ? "Mark as not counted" : "Mark as counted"}
             onClick={() => {
-              onEdit();
-              closeSwipe();
-            }}
-            style={{ width: ACTION_WIDTH }}
-            className="absolute inset-y-0 left-0 flex items-center justify-center bg-primary text-xs font-semibold text-primary-foreground"
-          >
-            Edit
-          </button>
-          <button
-            type="button"
-            tabIndex={-1}
-            aria-hidden="true"
-            onClick={() => {
-              if (!isAdmin) {
-                alert("Only an admin can delete items.");
-                closeSwipe();
+              if (isDeleted || !isDone) {
+                setOpen((o) => !o);
                 return;
               }
-              if (confirm(`Delete "${item.name}" from inventory?`)) onDelete();
-              closeSwipe();
+              onClear();
             }}
-            style={{ width: ACTION_WIDTH }}
-            className="absolute inset-y-0 right-0 flex items-center justify-center bg-destructive text-xs font-semibold text-destructive-foreground"
+            disabled={isDeleted}
+            className={`flex size-8 shrink-0 items-center justify-center rounded-full border text-sm transition-colors ${
+              isDeleted
+                ? "border-input text-muted-foreground/40"
+                : isDone
+                  ? "border-primary bg-primary text-primary-foreground"
+                  : "border-input text-muted-foreground"
+            }`}
           >
-            Delete
+            {isDone ? "✓" : ""}
           </button>
-        </>
-      )}
-      <div
-        onPointerDown={onSwipePointerDown}
-        onPointerMove={onSwipePointerMove}
-        onPointerUp={endSwipeDrag}
-        onPointerCancel={endSwipeDrag}
-        style={{
-          transform: `translateX(${dragX}px)`,
-          transition: swiping ? "none" : "transform 0.2s ease",
-          touchAction: swipeEnabled ? "pan-y" : undefined,
-        }}
-        className={`relative ${bgClass}`}
-      >
-        <div className="flex items-center gap-3 px-3 py-3">
-          {selectMode ? (
-            <input
-              type="checkbox"
-              aria-label={`Select ${item.name}`}
-              checked={selected}
-              onChange={onToggleSelect}
-              className="size-5 shrink-0 accent-primary"
-            />
-          ) : (
-            <button
-              aria-label={isDone ? "Mark as not counted" : "Mark as counted"}
-              onClick={() => {
-                if (dragX !== 0) {
-                  closeSwipe();
-                  return;
-                }
-                if (isDeleted || !isDone) {
-                  setOpen((o) => !o);
-                  return;
-                }
-                onClear();
-              }}
-              disabled={isDeleted}
-              className={`flex size-8 shrink-0 items-center justify-center rounded-full border text-sm transition-colors ${
-                isDeleted
-                  ? "border-input text-muted-foreground/40"
-                  : isDone
-                    ? "border-primary bg-primary text-primary-foreground"
-                    : "border-input text-muted-foreground"
-              }`}
-            >
-              {isDone ? "✓" : ""}
-            </button>
-          )}
-          <button
-            onClick={() => {
-              if (dragX !== 0) {
-                closeSwipe();
-                return;
-              }
-              if (selectMode) onToggleSelect();
-              else setOpen((o) => !o);
-            }}
-            className="min-w-0 flex-1 text-left"
-          >
-            <p className="flex items-center gap-1.5 truncate text-sm font-medium text-foreground">
-              {showOutlet && (
-                <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground">
-                  {item.outlet}
-                </span>
-              )}
-              <span className="truncate">{item.name}</span>
-            </p>
-            <p className="text-xs text-muted-foreground">
-              #{item.id} · system {item.qty} · MVR {item.price.toFixed(2)}
-              {isDone && (
-                <span className={diff === 0 ? " font-medium text-primary" : " font-medium text-destructive"}>
-                  {" "}
-                  · counted {counted} ({diff > 0 ? "+" : ""}
-                  {diff})
-                </span>
-              )}
-            </p>
-          </button>
-        </div>
+        )}
+        <button
+          onClick={() => (selectMode ? onToggleSelect() : setOpen((o) => !o))}
+          className="min-w-0 flex-1 text-left"
+        >
+          <p className="flex items-center gap-1.5 truncate text-sm font-medium text-foreground">
+            {showOutlet && (
+              <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground">
+                {item.outlet}
+              </span>
+            )}
+            <span className="truncate">{item.name}</span>
+          </p>
+          <p className="text-xs text-muted-foreground">
+            #{item.id} · system {item.qty} · MVR {item.price.toFixed(2)}
+            {isDone && (
+              <span className={diff === 0 ? " font-medium text-primary" : " font-medium text-destructive"}>
+                {" "}
+                · counted {counted} ({diff > 0 ? "+" : ""}
+                {diff})
+              </span>
+            )}
+          </p>
+        </button>
+      </div>
 
-        {open && (
+      {open && (
         <div className="space-y-3 border-t border-border bg-muted/40 px-3 py-3">
           <div className="grid grid-cols-2 gap-2 text-xs text-muted-foreground">
             <span>Outlet: <span className="text-foreground">{item.outlet}</span></span>
@@ -1679,8 +1573,7 @@ function Row({
             </>
           )}
         </div>
-        )}
-      </div>
+      )}
     </li>
   );
 }
