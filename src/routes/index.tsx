@@ -714,7 +714,7 @@ function Index() {
 
   return (
     <main className="min-h-screen bg-background pb-24">
-      <header className="sticky top-0 z-10 border-b border-border bg-card/95 shadow-sm backdrop-blur">
+      <header className="sticky top-0 z-10 border-b border-border bg-[#dae2e8] shadow-sm">
         <div className="mx-auto max-w-3xl px-4 py-4 sm:px-6">
           <div className="flex items-center justify-between gap-3">
             <div className="flex items-center gap-2.5">
