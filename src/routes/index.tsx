@@ -187,6 +187,11 @@ function Index() {
   const [addOutlet, setAddOutlet] = useState(DEFAULT_OUTLET);
   const [editingItem, setEditingItem] = useState<Item | null>(null);
   const [showStaffPanel, setShowStaffPanel] = useState(false);
+  // Admin-only bulk selection ("Select items" toolbar button below) — lets
+  // an admin cherry-pick specific items (within the current outlet/search/
+  // filter view) and delete just those, instead of only "delete all".
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [loaded, setLoaded] = useState(false);
   const [account, setAccount] = useState<StaffAccount | null>(null);
   // In-memory only (never persisted) — lets admin actions in the staff
@@ -596,6 +601,44 @@ function Index() {
     }
   };
 
+  // Soft-deletes a hand-picked set of items (the "Select items" bulk-select
+  // flow below), as opposed to deleteAllCustomItems which wipes every
+  // custom item in one outlet. Can span multiple outlets when "All
+  // outlets" is the current view, so the writes are grouped per outlet.
+  const deleteSelectedItems = async (selected: Item[]) => {
+    const targets = selected.filter((it) => it.source !== "base" && !it.deleted);
+    if (targets.length === 0) return;
+    const keys = targets.map((it) => keyOf(it.outlet, it.id));
+    setCustomItems((prev) => {
+      const next = { ...prev };
+      for (const k of keys) {
+        const it = next[k];
+        if (it) next[k] = { ...it, deleted: true };
+      }
+      return next;
+    });
+    if (supabaseEnabled && supabase) {
+      const idsByOutlet = new Map<string, string[]>();
+      for (const it of targets) {
+        const arr = idsByOutlet.get(it.outlet) ?? [];
+        arr.push(it.id);
+        idsByOutlet.set(it.outlet, arr);
+      }
+      for (const [outlet, ids] of idsByOutlet) {
+        const { error } = await supabase
+          .from("stock_items")
+          .update({ deleted: true, updated_at: new Date().toISOString() })
+          .eq("outlet", outlet)
+          .eq("source", "custom")
+          .in("id", ids);
+        if (error) {
+          console.error("Failed to delete selected items", error);
+          alert("Could not delete selected item(s) from the shared database — check your connection and try again.");
+        }
+      }
+    }
+  };
+
   // Items scoped to whichever outlet is currently selected (or every
   // outlet, when "All outlets" is picked) — used for the progress bar and
   // as the base list the search box and filter tabs narrow further.
@@ -624,7 +667,32 @@ function Index() {
   }, [query, filter, counts, items, outletScopedActiveItems, selectedOutlet]);
 
   const done = outletScopedActiveItems.filter((i) => counts[keyOf(i.outlet, i.id)] !== undefined).length;
+  const uncounted = outletScopedActiveItems.length - done;
   const pct = outletScopedActiveItems.length === 0 ? 0 : Math.round((done / outletScopedActiveItems.length) * 100);
+
+  // Only currently-visible, deletable rows can be picked in bulk-select
+  // mode — base catalog rows and (obviously) already-deleted rows can't.
+  const selectableResults = useMemo(
+    () => (filter === "deleted" ? [] : results.filter((i) => i.source !== "base")),
+    [results, filter],
+  );
+  const allSelectableChosen =
+    selectableResults.length > 0 && selectableResults.every((i) => selectedKeys.has(keyOf(i.outlet, i.id)));
+  const toggleSelectAll = () => {
+    setSelectedKeys((prev) => {
+      if (allSelectableChosen) return new Set();
+      return new Set(selectableResults.map((i) => keyOf(i.outlet, i.id)));
+    });
+  };
+  const toggleSelectOne = (item: Item) => {
+    const k = keyOf(item.outlet, item.id);
+    setSelectedKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(k)) next.delete(k);
+      else next.add(k);
+      return next;
+    });
+  };
 
   if (!authChecked) return null;
 
@@ -702,6 +770,35 @@ function Index() {
               style={{ width: `${pct}%` }}
             />
           </div>
+
+          <div className="mt-3 grid grid-cols-3 gap-2">
+            <div className="rounded-lg border border-border bg-card px-3 py-2">
+              <p className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+                <span className="size-1.5 shrink-0 rounded-full bg-muted-foreground/50" aria-hidden="true" />
+                Total
+              </p>
+              <p className="mt-0.5 text-lg font-semibold text-foreground">
+                {outletScopedActiveItems.length.toLocaleString()}
+              </p>
+            </div>
+            <div className="rounded-lg border border-border bg-card px-3 py-2">
+              <p className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+                <span className="size-1.5 shrink-0 rounded-full bg-primary" aria-hidden="true" />
+                Counted
+              </p>
+              <p className="mt-0.5 text-lg font-semibold text-foreground">
+                {done.toLocaleString()} <span className="text-xs font-medium text-muted-foreground">({pct}%)</span>
+              </p>
+            </div>
+            <div className="rounded-lg border border-border bg-card px-3 py-2">
+              <p className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+                <span className="size-1.5 shrink-0 rounded-full bg-destructive/60" aria-hidden="true" />
+                Uncounted
+              </p>
+              <p className="mt-0.5 text-lg font-semibold text-foreground">{uncounted.toLocaleString()}</p>
+            </div>
+          </div>
+
           <input
             autoFocus
             value={query}
@@ -850,8 +947,64 @@ function Index() {
               >
                 Delete all items
               </button>
+
+              <button
+                onClick={() => {
+                  if (account.role !== "admin") {
+                    alert("Only an admin can select items to delete.");
+                    return;
+                  }
+                  setSelectMode((v) => !v);
+                  setSelectedKeys(new Set());
+                }}
+                title={account.role === "admin" ? undefined : "Admin only"}
+                className={`min-h-9 rounded-lg px-2.5 py-1.5 font-medium transition-colors ${
+                  account.role === "admin"
+                    ? selectMode
+                      ? "bg-primary text-primary-foreground"
+                      : "text-primary hover:bg-primary/10"
+                    : "cursor-not-allowed text-muted-foreground/50"
+                }`}
+              >
+                {selectMode ? "Cancel select" : "Select items"}
+              </button>
             </div>
           </div>
+
+          {selectMode && (
+            <div className="mt-3 flex items-center justify-between gap-2 rounded-lg border border-dashed border-input px-3 py-2 text-xs">
+              <label className="flex min-w-0 items-center gap-2 text-foreground">
+                <input
+                  type="checkbox"
+                  checked={allSelectableChosen}
+                  onChange={toggleSelectAll}
+                  disabled={selectableResults.length === 0}
+                  className="size-4 shrink-0 accent-primary"
+                />
+                <span className="truncate">Select all ({selectableResults.length})</span>
+              </label>
+              <span className="shrink-0 text-muted-foreground">{selectedKeys.size} selected</span>
+              <button
+                type="button"
+                disabled={selectedKeys.size === 0}
+                onClick={() => {
+                  const targets = items.filter((i) => selectedKeys.has(keyOf(i.outlet, i.id)));
+                  if (targets.length === 0) return;
+                  if (confirm(`Delete ${targets.length} selected item(s)? They can be restored from the "Deleted" filter.`)) {
+                    void deleteSelectedItems(targets);
+                    setSelectedKeys(new Set());
+                  }
+                }}
+                className={`shrink-0 rounded-lg px-2.5 py-1.5 font-medium transition-colors ${
+                  selectedKeys.size === 0
+                    ? "cursor-not-allowed text-muted-foreground/50"
+                    : "text-destructive hover:bg-destructive/10"
+                }`}
+              >
+                Delete selected
+              </button>
+            </div>
+          )}
         </div>
       </header>
 
@@ -864,22 +1017,28 @@ function Index() {
           <p className="py-16 text-center text-sm text-muted-foreground">No items found.</p>
         ) : (
           <ul className="space-y-2">
-            {results.map((item) => (
-              <Row
-                key={keyOf(item.outlet, item.id)}
-                item={item}
-                counted={counts[keyOf(item.outlet, item.id)]}
-                isCustom={item.source !== "base"}
-                isAdmin={account.role === "admin"}
-                isDeleted={!!item.deleted}
-                showOutlet={selectedOutlet === ALL_OUTLETS}
-                onSave={(v) => void saveCount(item.outlet, item.id, v)}
-                onClear={() => void clearCount(item.outlet, item.id)}
-                onEdit={() => setEditingItem(item)}
-                onDelete={() => void deleteItem(item)}
-                onRestore={() => void restoreItem(item)}
-              />
-            ))}
+            {results.map((item) => {
+              const k = keyOf(item.outlet, item.id);
+              return (
+                <Row
+                  key={k}
+                  item={item}
+                  counted={counts[k]}
+                  isCustom={item.source !== "base"}
+                  isAdmin={account.role === "admin"}
+                  isDeleted={!!item.deleted}
+                  showOutlet={selectedOutlet === ALL_OUTLETS}
+                  selectMode={selectMode && item.source !== "base"}
+                  selected={selectedKeys.has(k)}
+                  onToggleSelect={() => toggleSelectOne(item)}
+                  onSave={(v) => void saveCount(item.outlet, item.id, v)}
+                  onClear={() => void clearCount(item.outlet, item.id)}
+                  onEdit={() => setEditingItem(item)}
+                  onDelete={() => void deleteItem(item)}
+                  onRestore={() => void restoreItem(item)}
+                />
+              );
+            })}
           </ul>
         )}
       </div>
@@ -930,6 +1089,9 @@ function Row({
   isAdmin,
   isDeleted,
   showOutlet,
+  selectMode,
+  selected,
+  onToggleSelect,
   onSave,
   onClear,
   onEdit,
@@ -942,6 +1104,11 @@ function Row({
   isAdmin: boolean;
   isDeleted: boolean;
   showOutlet: boolean;
+  // True only while the admin-only bulk "Select items" mode is on AND this
+  // row is eligible (not a base-catalog row) — see the toolbar in Index().
+  selectMode: boolean;
+  selected: boolean;
+  onToggleSelect: () => void;
   onSave: (v: number) => void;
   onClear: () => void;
   onEdit: () => void;
@@ -956,31 +1123,50 @@ function Row({
   return (
     <li
       className={`overflow-hidden rounded-xl border transition-colors ${
-        isDeleted ? "border-border bg-muted/30 opacity-70" : isDone ? "border-primary/30 bg-primary/5" : "border-border bg-card"
+        selected
+          ? "border-primary bg-primary/10"
+          : isDeleted
+            ? "border-border bg-muted/30 opacity-70"
+            : isDone
+              ? "border-primary/30 bg-primary/5"
+              : "border-border bg-card"
       }`}
     >
       <div className="flex items-center gap-3 px-3 py-3">
+        {selectMode ? (
+          <input
+            type="checkbox"
+            aria-label={`Select ${item.name}`}
+            checked={selected}
+            onChange={onToggleSelect}
+            className="size-5 shrink-0 accent-primary"
+          />
+        ) : (
+          <button
+            aria-label={isDone ? "Mark as not counted" : "Mark as counted"}
+            onClick={() => {
+              if (isDeleted || !isDone) {
+                setOpen((o) => !o);
+                return;
+              }
+              onClear();
+            }}
+            disabled={isDeleted}
+            className={`flex size-8 shrink-0 items-center justify-center rounded-full border text-sm transition-colors ${
+              isDeleted
+                ? "border-input text-muted-foreground/40"
+                : isDone
+                  ? "border-primary bg-primary text-primary-foreground"
+                  : "border-input text-muted-foreground"
+            }`}
+          >
+            {isDone ? "✓" : ""}
+          </button>
+        )}
         <button
-          aria-label={isDone ? "Mark as not counted" : "Mark as counted"}
-          onClick={() => {
-            if (isDeleted || !isDone) {
-              setOpen((o) => !o);
-              return;
-            }
-            onClear();
-          }}
-          disabled={isDeleted}
-          className={`flex size-8 shrink-0 items-center justify-center rounded-full border text-sm transition-colors ${
-            isDeleted
-              ? "border-input text-muted-foreground/40"
-              : isDone
-                ? "border-primary bg-primary text-primary-foreground"
-                : "border-input text-muted-foreground"
-          }`}
+          onClick={() => (selectMode ? onToggleSelect() : setOpen((o) => !o))}
+          className="min-w-0 flex-1 text-left"
         >
-          {isDone ? "✓" : ""}
-        </button>
-        <button onClick={() => setOpen((o) => !o)} className="min-w-0 flex-1 text-left">
           <p className="flex items-center gap-1.5 truncate text-sm font-medium text-foreground">
             {showOutlet && (
               <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground">
