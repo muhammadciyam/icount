@@ -715,7 +715,7 @@ function Index() {
   return (
     <main className="min-h-screen bg-background pb-24">
       <header className="sticky top-0 z-10 border-b border-border bg-[#dae2e8] shadow-sm">
-        <div className="mx-auto max-w-3xl px-4 py-4 sm:px-6">
+        <div className="mx-auto max-w-3xl px-4 py-2 sm:px-6">
           <div className="flex items-center justify-between gap-3">
             <div className="flex items-center gap-2.5">
               <div className="flex size-9 items-center justify-center rounded-xl bg-primary text-base font-bold text-primary-foreground shadow-sm">
@@ -764,38 +764,32 @@ function Index() {
               </button>
             </div>
           </div>
-          <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-muted">
+          <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-muted">
             <div
               className="h-full rounded-full bg-primary transition-all duration-300"
               style={{ width: `${pct}%` }}
             />
           </div>
 
-          <div className="mt-3 grid grid-cols-3 gap-2">
-            <div className="rounded-lg border border-border bg-card px-3 py-2">
-              <p className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
-                <span className="size-1.5 shrink-0 rounded-full bg-muted-foreground/50" aria-hidden="true" />
-                Total
-              </p>
-              <p className="mt-0.5 text-lg font-semibold text-foreground">
+          <div className="mt-1.5 grid grid-cols-3 gap-1.5">
+            <div className="flex items-center gap-1.5 rounded-lg border border-border bg-card px-2 py-1">
+              <span className="size-1.5 shrink-0 rounded-full bg-muted-foreground/50" aria-hidden="true" />
+              <span className="text-[10px] font-medium text-muted-foreground">Total</span>
+              <span className="ml-auto text-sm font-semibold text-foreground">
                 {outletScopedActiveItems.length.toLocaleString()}
-              </p>
+              </span>
             </div>
-            <div className="rounded-lg border border-border bg-card px-3 py-2">
-              <p className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
-                <span className="size-1.5 shrink-0 rounded-full bg-primary" aria-hidden="true" />
-                Counted
-              </p>
-              <p className="mt-0.5 text-lg font-semibold text-foreground">
-                {done.toLocaleString()} <span className="text-xs font-medium text-muted-foreground">({pct}%)</span>
-              </p>
+            <div className="flex items-center gap-1.5 rounded-lg border border-border bg-card px-2 py-1">
+              <span className="size-1.5 shrink-0 rounded-full bg-primary" aria-hidden="true" />
+              <span className="text-[10px] font-medium text-muted-foreground">Counted</span>
+              <span className="ml-auto text-sm font-semibold text-foreground">
+                {done.toLocaleString()} <span className="text-[10px] font-medium text-muted-foreground">({pct}%)</span>
+              </span>
             </div>
-            <div className="rounded-lg border border-border bg-card px-3 py-2">
-              <p className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
-                <span className="size-1.5 shrink-0 rounded-full bg-destructive/60" aria-hidden="true" />
-                Uncounted
-              </p>
-              <p className="mt-0.5 text-lg font-semibold text-foreground">{uncounted.toLocaleString()}</p>
+            <div className="flex items-center gap-1.5 rounded-lg border border-border bg-card px-2 py-1">
+              <span className="size-1.5 shrink-0 rounded-full bg-destructive/60" aria-hidden="true" />
+              <span className="text-[10px] font-medium text-muted-foreground">Uncounted</span>
+              <span className="ml-auto text-sm font-semibold text-foreground">{uncounted.toLocaleString()}</span>
             </div>
           </div>
 
@@ -805,14 +799,14 @@ function Index() {
             onChange={(e) => setQuery(e.target.value)}
             inputMode="search"
             placeholder="Search item name or barcode / ID…"
-            className="mt-3 w-full rounded-xl border border-input bg-background px-4 py-3.5 text-base text-foreground outline-none placeholder:text-muted-foreground focus:ring-2 focus:ring-ring sm:py-3"
+            className="mt-1.5 w-full rounded-xl border border-input bg-background px-4 py-2 text-base text-foreground outline-none placeholder:text-muted-foreground focus:ring-2 focus:ring-ring sm:py-1.5"
           />
-          <label className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
+          <label className="mt-1.5 flex items-center gap-2 text-xs text-muted-foreground">
             <span className="shrink-0 font-medium">Outlet</span>
             <select
               value={selectedOutlet}
               onChange={(e) => selectOutlet(e.target.value)}
-              className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground outline-none focus:ring-2 focus:ring-ring"
+              className="w-full rounded-lg border border-input bg-background px-3 py-1 text-sm text-foreground outline-none focus:ring-2 focus:ring-ring"
             >
               <option value={ALL_OUTLETS}>All outlets ({outlets.length})</option>
               {outlets.map((o) => (
@@ -822,13 +816,13 @@ function Index() {
               ))}
             </select>
           </label>
-          <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div className="mt-1.5 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex gap-1 rounded-lg border border-input p-1">
               {(["all", "pending", "counted", "deleted"] as const).map((f) => (
                 <button
                   key={f}
                   onClick={() => setFilter(f)}
-                  className={`flex-1 rounded-md px-3 py-2 text-xs font-medium transition-colors sm:flex-none sm:px-2.5 sm:py-1 ${
+                  className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors sm:flex-none sm:px-2.5 sm:py-1 ${
                     filter === f
                       ? "bg-primary text-primary-foreground"
                       : "text-muted-foreground hover:text-foreground"
@@ -839,7 +833,7 @@ function Index() {
               ))}
             </div>
             <div className="flex flex-wrap items-center gap-2 text-sm">
-              <label className="flex min-h-9 cursor-pointer items-center rounded-lg px-2.5 py-1.5 font-medium text-primary transition-colors hover:bg-primary/10">
+              <label className="flex min-h-8 cursor-pointer items-center rounded-lg px-2 py-1 font-medium text-primary transition-colors hover:bg-primary/10">
                 Import Excel
                 <input
                   type="file"
@@ -884,7 +878,7 @@ function Index() {
                   setAddOutlet(outlet);
                   setShowAdd(true);
                 }}
-                className="min-h-9 rounded-lg px-2.5 py-1.5 font-medium text-primary transition-colors hover:bg-primary/10"
+                className="min-h-8 rounded-lg px-2 py-1 font-medium text-primary transition-colors hover:bg-primary/10"
               >
                 + Add item
               </button>
@@ -904,7 +898,7 @@ function Index() {
                   }
                 }}
                 title={account.role === "admin" ? undefined : "Admin only"}
-                className={`min-h-9 rounded-lg px-2.5 py-1.5 font-medium transition-colors ${
+                className={`min-h-8 rounded-lg px-2 py-1 font-medium transition-colors ${
                   account.role === "admin"
                     ? "text-destructive hover:bg-destructive/10"
                     : "cursor-not-allowed text-muted-foreground/50"
@@ -939,7 +933,7 @@ function Index() {
                   }
                 }}
                 title={account.role === "admin" ? undefined : "Admin only"}
-                className={`min-h-9 rounded-lg px-2.5 py-1.5 font-medium transition-colors ${
+                className={`min-h-8 rounded-lg px-2 py-1 font-medium transition-colors ${
                   account.role === "admin"
                     ? "text-destructive hover:bg-destructive/10"
                     : "cursor-not-allowed text-muted-foreground/50"
@@ -958,7 +952,7 @@ function Index() {
                   setSelectedKeys(new Set());
                 }}
                 title={account.role === "admin" ? undefined : "Admin only"}
-                className={`min-h-9 rounded-lg px-2.5 py-1.5 font-medium transition-colors ${
+                className={`min-h-8 rounded-lg px-2 py-1 font-medium transition-colors ${
                   account.role === "admin"
                     ? selectMode
                       ? "bg-primary text-primary-foreground"
