@@ -1,7 +1,9 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import inventory from "@/data/inventory.json";
 import { supabase, supabaseEnabled } from "@/lib/supabase";
+
+type TabId = "home" | "inventory" | "scan" | "reports" | "more";
 
 type Item = {
   id: string;
@@ -179,6 +181,11 @@ export const Route = createFileRoute("/")({
 });
 
 function Index() {
+  // Which bottom-nav tab is showing. Inventory is the default landing tab
+  // since day-to-day counting is the app's main job; Home/Reports/More are
+  // reachable via the bottom nav for overview/analysis/admin tasks without
+  // cluttering the counting screen itself.
+  const [activeTab, setActiveTab] = useState<TabId>("inventory");
   const [query, setQuery] = useState("");
   const [counts, setCounts] = useState<CountState>({});
   const [customItems, setCustomItems] = useState<InventoryState>({});
@@ -694,6 +701,28 @@ function Index() {
     });
   };
 
+  // Reports tab: how far along each outlet is, computed independently of
+  // whichever outlet the picker currently has selected.
+  const perOutletProgress = useMemo(
+    () =>
+      outlets.map((o) => {
+        const outletItems = activeItems.filter((i) => i.outlet === o);
+        const doneCount = outletItems.filter((i) => counts[keyOf(o, i.id)] !== undefined).length;
+        return { outlet: o, total: outletItems.length, done: doneCount };
+      }),
+    [outlets, activeItems, counts],
+  );
+
+  // Reports tab: items whose counted qty doesn't match system qty, scoped
+  // to the same outlet the rest of the app is currently filtered to.
+  const varianceList = useMemo(() => {
+    const scope =
+      selectedOutlet === ALL_OUTLETS ? activeItems : activeItems.filter((i) => i.outlet === selectedOutlet);
+    return scope
+      .map((item) => ({ item, counted: counts[keyOf(item.outlet, item.id)] }))
+      .filter((x): x is { item: Item; counted: number } => x.counted !== undefined && x.counted !== x.item.qty);
+  }, [activeItems, counts, selectedOutlet]);
+
   if (!authChecked) return null;
 
   if (!account) {
@@ -712,328 +741,462 @@ function Index() {
     );
   }
 
+  const importExcelInput = (
+    <input
+      type="file"
+      accept=".xlsx,.xls,.csv"
+      className="hidden"
+      onChange={async (e) => {
+        const file = e.target.files?.[0];
+        e.target.value = "";
+        if (!file) return;
+        const defaultOutlet = selectedOutlet !== ALL_OUTLETS ? selectedOutlet : getLastOutlet();
+        const entered = prompt("Outlet name for this upload (e.g. branch/store name):", defaultOutlet);
+        if (!entered || !entered.trim()) return;
+        const outlet = entered.trim();
+        try {
+          const imported = await parseSheet(file, outlet);
+          if (imported.length === 0) {
+            alert("No rows found. Make sure the sheet has columns like Barcode/ID, Name, Qty.");
+            return;
+          }
+          await addItems(imported);
+          setLastOutlet(outlet);
+          selectOutlet(outlet);
+          alert(`Imported ${imported.length} items into "${outlet}".`);
+        } catch (err) {
+          alert("Could not read that file. Please upload a valid Excel or CSV file.");
+          console.error(err);
+        }
+      }}
+    />
+  );
+
+  const outletPicker = (
+    <label className="flex items-center gap-2 text-xs text-muted-foreground">
+      <span className="shrink-0 font-medium">Outlet</span>
+      <select
+        value={selectedOutlet}
+        onChange={(e) => selectOutlet(e.target.value)}
+        className="w-full rounded-lg border border-input bg-background px-3 py-1.5 text-sm text-foreground outline-none focus:ring-2 focus:ring-ring"
+      >
+        <option value={ALL_OUTLETS}>All outlets ({outlets.length})</option>
+        {outlets.map((o) => (
+          <option key={o} value={o}>
+            {o}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+
   return (
     <main className="min-h-screen bg-background pb-24">
       <header className="sticky top-0 z-10 border-b border-border bg-[#dae2e8] shadow-sm">
         <div className="mx-auto max-w-3xl px-4 py-2 sm:px-6">
-          <div className="flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2.5">
-              <div className="flex size-9 items-center justify-center rounded-xl bg-primary text-base font-bold text-primary-foreground shadow-sm">
-                7M
-              </div>
-              <div>
-                <h1 className="text-base font-semibold leading-tight tracking-tight text-foreground sm:text-lg">
-                  Stock Count
-                </h1>
-                <p className="text-xs text-muted-foreground">
-                  {done} / {outletScopedActiveItems.length} counted · {pct}%
-                  {selectedOutlet !== ALL_OUTLETS && ` · ${selectedOutlet}`}
-                </p>
-              </div>
+          <div className="flex items-center gap-2.5">
+            <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-primary text-base font-bold text-primary-foreground shadow-sm">
+              7M
             </div>
-            <div className="flex items-center gap-2">
-              <span className="hidden text-xs text-muted-foreground sm:inline">
-                Hi, <span className="font-medium text-foreground">{account.name}</span>
-                {account.role === "admin" && (
-                  <span className="ml-1.5 rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-semibold text-primary">
-                    Admin
-                  </span>
-                )}
-              </span>
-              <button
-                onClick={() => setShowStaffPanel(true)}
-                className="rounded-lg border border-input px-3 py-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-              >
-                Staff
-              </button>
-              <button
-                onClick={() => {
-                  if (confirm("Log out?")) {
-                    try {
-                      localStorage.removeItem(AUTH_KEY);
-                    } catch {
-                      /* ignore */
-                    }
-                    setAccount(null);
-                    setSessionPassword(null);
-                  }
-                }}
-                className="rounded-lg border border-input px-3 py-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-              >
-                Log out
-              </button>
-            </div>
-          </div>
-          <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-muted">
-            <div
-              className="h-full rounded-full bg-primary transition-all duration-300"
-              style={{ width: `${pct}%` }}
-            />
-          </div>
-
-          <div className="mt-1.5 grid grid-cols-3 gap-1.5">
-            <div className="flex items-center gap-1.5 rounded-lg border border-border bg-card px-2 py-1">
-              <span className="size-1.5 shrink-0 rounded-full bg-muted-foreground/50" aria-hidden="true" />
-              <span className="text-[10px] font-medium text-muted-foreground">Total</span>
-              <span className="ml-auto text-sm font-semibold text-foreground">
-                {outletScopedActiveItems.length.toLocaleString()}
-              </span>
-            </div>
-            <div className="flex items-center gap-1.5 rounded-lg border border-border bg-card px-2 py-1">
-              <span className="size-1.5 shrink-0 rounded-full bg-primary" aria-hidden="true" />
-              <span className="text-[10px] font-medium text-muted-foreground">Counted</span>
-              <span className="ml-auto text-sm font-semibold text-foreground">
-                {done.toLocaleString()} <span className="text-[10px] font-medium text-muted-foreground">({pct}%)</span>
-              </span>
-            </div>
-            <div className="flex items-center gap-1.5 rounded-lg border border-border bg-card px-2 py-1">
-              <span className="size-1.5 shrink-0 rounded-full bg-destructive/60" aria-hidden="true" />
-              <span className="text-[10px] font-medium text-muted-foreground">Uncounted</span>
-              <span className="ml-auto text-sm font-semibold text-foreground">{uncounted.toLocaleString()}</span>
+            <div className="min-w-0 flex-1">
+              <h1 className="text-base font-semibold leading-tight tracking-tight text-foreground sm:text-lg">
+                Stock Count
+              </h1>
+              <p className="truncate text-xs text-muted-foreground">
+                {done} / {outletScopedActiveItems.length} counted · {pct}%
+                {selectedOutlet !== ALL_OUTLETS && ` · ${selectedOutlet}`}
+              </p>
             </div>
           </div>
 
-          <input
-            autoFocus
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            inputMode="search"
-            placeholder="Search item name or barcode / ID…"
-            className="mt-1.5 w-full rounded-xl border border-input bg-background px-4 py-2 text-base text-foreground outline-none placeholder:text-muted-foreground focus:ring-2 focus:ring-ring sm:py-1.5"
-          />
-          <label className="mt-1.5 flex items-center gap-2 text-xs text-muted-foreground">
-            <span className="shrink-0 font-medium">Outlet</span>
-            <select
-              value={selectedOutlet}
-              onChange={(e) => selectOutlet(e.target.value)}
-              className="w-full rounded-lg border border-input bg-background px-3 py-1 text-sm text-foreground outline-none focus:ring-2 focus:ring-ring"
-            >
-              <option value={ALL_OUTLETS}>All outlets ({outlets.length})</option>
-              {outlets.map((o) => (
-                <option key={o} value={o}>
-                  {o}
-                </option>
-              ))}
-            </select>
-          </label>
-          <div className="mt-1.5 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex gap-1 rounded-lg border border-input p-1">
-              {(["all", "pending", "counted", "deleted"] as const).map((f) => (
-                <button
-                  key={f}
-                  onClick={() => setFilter(f)}
-                  className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors sm:flex-none sm:px-2.5 sm:py-1 ${
-                    filter === f
-                      ? "bg-primary text-primary-foreground"
-                      : "text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  {f === "all" ? "All" : f === "pending" ? "Not counted" : f === "counted" ? "Counted" : "Deleted"}
-                </button>
-              ))}
-            </div>
-            <div className="flex flex-wrap items-center gap-2 text-sm">
-              <label className="flex min-h-8 cursor-pointer items-center rounded-lg px-2 py-1 font-medium text-primary transition-colors hover:bg-primary/10">
-                Import Excel
-                <input
-                  type="file"
-                  accept=".xlsx,.xls,.csv"
-                  className="hidden"
-                  onChange={async (e) => {
-                    const file = e.target.files?.[0];
-                    e.target.value = "";
-                    if (!file) return;
-                    const defaultOutlet = selectedOutlet !== ALL_OUTLETS ? selectedOutlet : getLastOutlet();
-                    const entered = prompt(
-                      "Outlet name for this upload (e.g. branch/store name):",
-                      defaultOutlet,
-                    );
-                    if (!entered || !entered.trim()) return;
-                    const outlet = entered.trim();
-                    try {
-                      const imported = await parseSheet(file, outlet);
-                      if (imported.length === 0) {
-                        alert("No rows found. Make sure the sheet has columns like Barcode/ID, Name, Qty.");
-                        return;
+          {activeTab === "inventory" && (
+            <>
+              <input
+                autoFocus
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                inputMode="search"
+                placeholder="Search item name or barcode / ID…"
+                className="mt-2 w-full rounded-xl border border-input bg-background px-4 py-2 text-base text-foreground outline-none placeholder:text-muted-foreground focus:ring-2 focus:ring-ring sm:py-1.5"
+              />
+              <div className="mt-1.5">{outletPicker}</div>
+              <div className="mt-1.5 flex gap-1 rounded-lg border border-input p-1">
+                {(["all", "pending", "counted", "deleted"] as const).map((f) => (
+                  <button
+                    key={f}
+                    onClick={() => setFilter(f)}
+                    className={`flex-1 rounded-md px-2 py-1.5 text-xs font-medium transition-colors ${
+                      filter === f
+                        ? "bg-primary text-primary-foreground"
+                        : "text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    {f === "all" ? "All" : f === "pending" ? "Not counted" : f === "counted" ? "Counted" : "Deleted"}
+                  </button>
+                ))}
+              </div>
+
+              {selectMode && (
+                <div className="mt-1.5 flex items-center justify-between gap-2 rounded-lg border border-dashed border-input px-3 py-2 text-xs">
+                  <label className="flex min-w-0 items-center gap-2 text-foreground">
+                    <input
+                      type="checkbox"
+                      checked={allSelectableChosen}
+                      onChange={toggleSelectAll}
+                      disabled={selectableResults.length === 0}
+                      className="size-4 shrink-0 accent-primary"
+                    />
+                    <span className="truncate">Select all ({selectableResults.length})</span>
+                  </label>
+                  <span className="shrink-0 text-muted-foreground">{selectedKeys.size} selected</span>
+                  <button
+                    type="button"
+                    disabled={selectedKeys.size === 0}
+                    onClick={() => {
+                      const targets = items.filter((i) => selectedKeys.has(keyOf(i.outlet, i.id)));
+                      if (targets.length === 0) return;
+                      if (
+                        confirm(
+                          `Delete ${targets.length} selected item(s)? They can be restored from the "Deleted" filter.`,
+                        )
+                      ) {
+                        void deleteSelectedItems(targets);
+                        setSelectedKeys(new Set());
                       }
-                      await addItems(imported);
-                      setLastOutlet(outlet);
-                      selectOutlet(outlet);
-                      alert(`Imported ${imported.length} items into "${outlet}".`);
-                    } catch (err) {
-                      alert("Could not read that file. Please upload a valid Excel or CSV file.");
-                      console.error(err);
-                    }
-                  }}
-                />
-              </label>
-              <button
-                onClick={() => {
-                  let outlet = selectedOutlet;
-                  if (outlet === ALL_OUTLETS) {
-                    const entered = prompt("Which outlet is this item for?", getLastOutlet());
-                    if (!entered || !entered.trim()) return;
-                    outlet = entered.trim();
-                  }
-                  setAddOutlet(outlet);
-                  setShowAdd(true);
-                }}
-                className="min-h-8 rounded-lg px-2 py-1 font-medium text-primary transition-colors hover:bg-primary/10"
-              >
-                + Add item
-              </button>
-
-              <button
-                onClick={() => {
-                  if (account.role !== "admin") {
-                    alert("Only an admin can reset the count.");
-                    return;
-                  }
-                  if (selectedOutlet === ALL_OUTLETS) {
-                    alert("Select an outlet first — counts are reset one outlet at a time.");
-                    return;
-                  }
-                  if (confirm(`Clear all counted items for "${selectedOutlet}"?`)) {
-                    void resetAllCounts(selectedOutlet);
-                  }
-                }}
-                title={account.role === "admin" ? undefined : "Admin only"}
-                className={`min-h-8 rounded-lg px-2 py-1 font-medium transition-colors ${
-                  account.role === "admin"
-                    ? "text-destructive hover:bg-destructive/10"
-                    : "cursor-not-allowed text-muted-foreground/50"
-                }`}
-              >
-                Reset count
-              </button>
-
-              <button
-                onClick={() => {
-                  if (account.role !== "admin") {
-                    alert("Only an admin can delete all items.");
-                    return;
-                  }
-                  if (selectedOutlet === ALL_OUTLETS) {
-                    alert("Select an outlet first — inventory is deleted one outlet at a time.");
-                    return;
-                  }
-                  const activeCustomCount = Object.values(customItems).filter(
-                    (it) => it.outlet === selectedOutlet && it.source !== "base" && !it.deleted,
-                  ).length;
-                  if (activeCustomCount === 0) {
-                    alert("No added/imported items to delete for this outlet.");
-                    return;
-                  }
-                  if (
-                    confirm(
-                      `Delete all ${activeCustomCount} added/imported item(s) in "${selectedOutlet}"? The base inventory list isn't affected. Deleted items can be restored from the "Deleted" filter.`,
-                    )
-                  ) {
-                    void deleteAllCustomItems(selectedOutlet);
-                  }
-                }}
-                title={account.role === "admin" ? undefined : "Admin only"}
-                className={`min-h-8 rounded-lg px-2 py-1 font-medium transition-colors ${
-                  account.role === "admin"
-                    ? "text-destructive hover:bg-destructive/10"
-                    : "cursor-not-allowed text-muted-foreground/50"
-                }`}
-              >
-                Delete all items
-              </button>
-
-              <button
-                onClick={() => {
-                  if (account.role !== "admin") {
-                    alert("Only an admin can select items to delete.");
-                    return;
-                  }
-                  setSelectMode((v) => !v);
-                  setSelectedKeys(new Set());
-                }}
-                title={account.role === "admin" ? undefined : "Admin only"}
-                className={`min-h-8 rounded-lg px-2 py-1 font-medium transition-colors ${
-                  account.role === "admin"
-                    ? selectMode
-                      ? "bg-primary text-primary-foreground"
-                      : "text-primary hover:bg-primary/10"
-                    : "cursor-not-allowed text-muted-foreground/50"
-                }`}
-              >
-                {selectMode ? "Cancel select" : "Select items"}
-              </button>
-            </div>
-          </div>
-
-          {selectMode && (
-            <div className="mt-3 flex items-center justify-between gap-2 rounded-lg border border-dashed border-input px-3 py-2 text-xs">
-              <label className="flex min-w-0 items-center gap-2 text-foreground">
-                <input
-                  type="checkbox"
-                  checked={allSelectableChosen}
-                  onChange={toggleSelectAll}
-                  disabled={selectableResults.length === 0}
-                  className="size-4 shrink-0 accent-primary"
-                />
-                <span className="truncate">Select all ({selectableResults.length})</span>
-              </label>
-              <span className="shrink-0 text-muted-foreground">{selectedKeys.size} selected</span>
-              <button
-                type="button"
-                disabled={selectedKeys.size === 0}
-                onClick={() => {
-                  const targets = items.filter((i) => selectedKeys.has(keyOf(i.outlet, i.id)));
-                  if (targets.length === 0) return;
-                  if (confirm(`Delete ${targets.length} selected item(s)? They can be restored from the "Deleted" filter.`)) {
-                    void deleteSelectedItems(targets);
-                    setSelectedKeys(new Set());
-                  }
-                }}
-                className={`shrink-0 rounded-lg px-2.5 py-1.5 font-medium transition-colors ${
-                  selectedKeys.size === 0
-                    ? "cursor-not-allowed text-muted-foreground/50"
-                    : "text-destructive hover:bg-destructive/10"
-                }`}
-              >
-                Delete selected
-              </button>
-            </div>
+                    }}
+                    className={`shrink-0 rounded-lg px-2.5 py-1.5 font-medium transition-colors ${
+                      selectedKeys.size === 0
+                        ? "cursor-not-allowed text-muted-foreground/50"
+                        : "text-destructive hover:bg-destructive/10"
+                    }`}
+                  >
+                    Delete selected
+                  </button>
+                </div>
+              )}
+            </>
           )}
         </div>
       </header>
 
-      <div className="mx-auto max-w-3xl px-3 sm:px-6">
-        <p className="py-3 text-center text-xs text-muted-foreground">
-          Showing all {results.length.toLocaleString()} item{results.length === 1 ? "" : "s"}
-          {selectedOutlet === ALL_OUTLETS ? ` across ${outlets.length} outlet(s)` : ` in "${selectedOutlet}"`}
-        </p>
-        {results.length === 0 ? (
-          <p className="py-16 text-center text-sm text-muted-foreground">No items found.</p>
-        ) : (
-          <ul className="space-y-2">
-            {results.map((item) => {
-              const k = keyOf(item.outlet, item.id);
-              return (
-                <Row
-                  key={k}
-                  item={item}
-                  counted={counts[k]}
-                  isCustom={item.source !== "base"}
-                  isAdmin={account.role === "admin"}
-                  isDeleted={!!item.deleted}
-                  showOutlet={selectedOutlet === ALL_OUTLETS}
-                  selectMode={selectMode && item.source !== "base"}
-                  selected={selectedKeys.has(k)}
-                  onToggleSelect={() => toggleSelectOne(item)}
-                  onSave={(v) => void saveCount(item.outlet, item.id, v)}
-                  onClear={() => void clearCount(item.outlet, item.id)}
-                  onEdit={() => setEditingItem(item)}
-                  onDelete={() => void deleteItem(item)}
-                  onRestore={() => void restoreItem(item)}
-                />
-              );
-            })}
-          </ul>
+      <div className="mx-auto max-w-3xl px-3 pb-6 sm:px-6">
+        {activeTab === "home" && (
+          <div className="space-y-4 py-4">
+            <div className="grid grid-cols-3 gap-2">
+              <div className="rounded-xl border border-border bg-card px-3 py-3">
+                <p className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+                  <span className="size-1.5 shrink-0 rounded-full bg-muted-foreground/50" aria-hidden="true" />
+                  Total
+                </p>
+                <p className="mt-1 text-2xl font-semibold text-foreground">
+                  {outletScopedActiveItems.length.toLocaleString()}
+                </p>
+              </div>
+              <div className="rounded-xl border border-border bg-card px-3 py-3">
+                <p className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+                  <span className="size-1.5 shrink-0 rounded-full bg-primary" aria-hidden="true" />
+                  Counted
+                </p>
+                <p className="mt-1 text-2xl font-semibold text-foreground">{done.toLocaleString()}</p>
+              </div>
+              <div className="rounded-xl border border-border bg-card px-3 py-3">
+                <p className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+                  <span className="size-1.5 shrink-0 rounded-full bg-destructive/60" aria-hidden="true" />
+                  Uncounted
+                </p>
+                <p className="mt-1 text-2xl font-semibold text-foreground">{uncounted.toLocaleString()}</p>
+              </div>
+            </div>
+
+            <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+              <div
+                className="h-full rounded-full bg-primary transition-all duration-300"
+                style={{ width: `${pct}%` }}
+              />
+            </div>
+            <p className="text-center text-xs text-muted-foreground">{pct}% counted</p>
+
+            <div className="rounded-xl border border-border bg-card p-3">{outletPicker}</div>
+
+            <button
+              onClick={() => {
+                setFilter("pending");
+                setActiveTab("inventory");
+              }}
+              className="min-h-11 w-full rounded-xl bg-primary text-sm font-semibold text-primary-foreground shadow-sm transition-opacity hover:opacity-90"
+            >
+              Continue counting →
+            </button>
+          </div>
+        )}
+
+        {activeTab === "inventory" && (
+          <>
+            <p className="py-3 text-center text-xs text-muted-foreground">
+              Showing all {results.length.toLocaleString()} item{results.length === 1 ? "" : "s"}
+              {selectedOutlet === ALL_OUTLETS ? ` across ${outlets.length} outlet(s)` : ` in "${selectedOutlet}"`}
+            </p>
+            {results.length === 0 ? (
+              <p className="py-16 text-center text-sm text-muted-foreground">No items found.</p>
+            ) : (
+              <ul className="space-y-2">
+                {results.map((item) => {
+                  const k = keyOf(item.outlet, item.id);
+                  return (
+                    <Row
+                      key={k}
+                      item={item}
+                      counted={counts[k]}
+                      isCustom={item.source !== "base"}
+                      isAdmin={account.role === "admin"}
+                      isDeleted={!!item.deleted}
+                      showOutlet={selectedOutlet === ALL_OUTLETS}
+                      selectMode={selectMode && item.source !== "base"}
+                      selected={selectedKeys.has(k)}
+                      onToggleSelect={() => toggleSelectOne(item)}
+                      onSave={(v) => void saveCount(item.outlet, item.id, v)}
+                      onClear={() => void clearCount(item.outlet, item.id)}
+                      onEdit={() => setEditingItem(item)}
+                      onDelete={() => void deleteItem(item)}
+                      onRestore={() => void restoreItem(item)}
+                    />
+                  );
+                })}
+              </ul>
+            )}
+          </>
+        )}
+
+        {activeTab === "scan" && (
+          <ScanTab
+            onDetected={(text) => {
+              setQuery(text);
+              setFilter("all");
+              selectOutlet(ALL_OUTLETS);
+              setActiveTab("inventory");
+            }}
+          />
+        )}
+
+        {activeTab === "reports" && (
+          <div className="space-y-5 py-4">
+            <div>
+              <h2 className="text-sm font-semibold text-foreground">Per-outlet progress</h2>
+              <ul className="mt-2 space-y-2">
+                {perOutletProgress.length === 0 && (
+                  <p className="text-xs text-muted-foreground">No outlets yet.</p>
+                )}
+                {perOutletProgress.map((row) => {
+                  const rowPct = row.total === 0 ? 0 : Math.round((row.done / row.total) * 100);
+                  return (
+                    <li key={row.outlet} className="rounded-lg border border-border bg-card px-3 py-2">
+                      <div className="flex items-center justify-between gap-2 text-sm">
+                        <span className="min-w-0 truncate font-medium text-foreground">{row.outlet}</span>
+                        <span className="shrink-0 text-xs text-muted-foreground">
+                          {row.done}/{row.total} · {rowPct}%
+                        </span>
+                      </div>
+                      <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                        <div
+                          className="h-full rounded-full bg-primary transition-all duration-300"
+                          style={{ width: `${rowPct}%` }}
+                        />
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+
+            <div>
+              <h2 className="text-sm font-semibold text-foreground">
+                Variances{selectedOutlet !== ALL_OUTLETS && ` — ${selectedOutlet}`}
+              </h2>
+              <p className="text-xs text-muted-foreground">
+                Items whose counted quantity doesn't match the system quantity.
+              </p>
+              <ul className="mt-2 space-y-2">
+                {varianceList.length === 0 && (
+                  <p className="text-xs text-muted-foreground">No variances yet.</p>
+                )}
+                {varianceList.map(({ item, counted }) => {
+                  const diff = counted - item.qty;
+                  return (
+                    <li
+                      key={keyOf(item.outlet, item.id)}
+                      className="rounded-lg border border-border bg-card px-3 py-2 text-sm"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="min-w-0 truncate font-medium text-foreground">{item.name}</span>
+                        <span
+                          className={`shrink-0 font-semibold ${diff > 0 ? "text-primary" : "text-destructive"}`}
+                        >
+                          {diff > 0 ? "+" : ""}
+                          {diff}
+                        </span>
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        {item.outlet} · #{item.id} · system {item.qty} · counted {counted}
+                      </p>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          </div>
+        )}
+
+        {activeTab === "more" && (
+          <div className="space-y-2 py-4">
+            <div className="rounded-xl border border-border bg-card p-3">{outletPicker}</div>
+
+            <label className="flex min-h-11 cursor-pointer items-center gap-3 rounded-xl border border-border bg-card px-4 text-sm font-medium text-primary transition-colors hover:bg-primary/5">
+              Import Excel
+              {importExcelInput}
+            </label>
+
+            <button
+              onClick={() => {
+                let outlet = selectedOutlet;
+                if (outlet === ALL_OUTLETS) {
+                  const entered = prompt("Which outlet is this item for?", getLastOutlet());
+                  if (!entered || !entered.trim()) return;
+                  outlet = entered.trim();
+                }
+                setAddOutlet(outlet);
+                setShowAdd(true);
+              }}
+              className="flex min-h-11 w-full items-center gap-3 rounded-xl border border-border bg-card px-4 text-left text-sm font-medium text-primary transition-colors hover:bg-primary/5"
+            >
+              + Add item
+            </button>
+
+            <button
+              onClick={() => {
+                if (account.role !== "admin") {
+                  alert("Only an admin can select items to delete.");
+                  return;
+                }
+                setSelectMode(true);
+                setSelectedKeys(new Set());
+                setActiveTab("inventory");
+              }}
+              title={account.role === "admin" ? undefined : "Admin only"}
+              className={`flex min-h-11 w-full items-center gap-3 rounded-xl border border-border bg-card px-4 text-left text-sm font-medium transition-colors ${
+                account.role === "admin"
+                  ? "text-primary hover:bg-primary/5"
+                  : "cursor-not-allowed text-muted-foreground/50"
+              }`}
+            >
+              Select items…
+            </button>
+
+            <div className="pt-2">
+              <p className="px-1 pb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                Destructive — outlet-scoped
+              </p>
+              <div className="space-y-2">
+                <button
+                  onClick={() => {
+                    if (account.role !== "admin") {
+                      alert("Only an admin can reset the count.");
+                      return;
+                    }
+                    if (selectedOutlet === ALL_OUTLETS) {
+                      alert("Select an outlet first — counts are reset one outlet at a time.");
+                      return;
+                    }
+                    if (confirm(`Clear all counted items for "${selectedOutlet}"?`)) {
+                      void resetAllCounts(selectedOutlet);
+                    }
+                  }}
+                  title={account.role === "admin" ? undefined : "Admin only"}
+                  className={`flex min-h-11 w-full items-center gap-3 rounded-xl border px-4 text-left text-sm font-medium transition-colors ${
+                    account.role === "admin"
+                      ? "border-destructive/30 text-destructive hover:bg-destructive/10"
+                      : "cursor-not-allowed border-border text-muted-foreground/50"
+                  }`}
+                >
+                  Reset count
+                </button>
+
+                <button
+                  onClick={() => {
+                    if (account.role !== "admin") {
+                      alert("Only an admin can delete all items.");
+                      return;
+                    }
+                    if (selectedOutlet === ALL_OUTLETS) {
+                      alert("Select an outlet first — inventory is deleted one outlet at a time.");
+                      return;
+                    }
+                    const activeCustomCount = Object.values(customItems).filter(
+                      (it) => it.outlet === selectedOutlet && it.source !== "base" && !it.deleted,
+                    ).length;
+                    if (activeCustomCount === 0) {
+                      alert("No added/imported items to delete for this outlet.");
+                      return;
+                    }
+                    if (
+                      confirm(
+                        `Delete all ${activeCustomCount} added/imported item(s) in "${selectedOutlet}"? The base inventory list isn't affected. Deleted items can be restored from the "Deleted" filter.`,
+                      )
+                    ) {
+                      void deleteAllCustomItems(selectedOutlet);
+                    }
+                  }}
+                  title={account.role === "admin" ? undefined : "Admin only"}
+                  className={`flex min-h-11 w-full items-center gap-3 rounded-xl border px-4 text-left text-sm font-medium transition-colors ${
+                    account.role === "admin"
+                      ? "border-destructive/30 text-destructive hover:bg-destructive/10"
+                      : "cursor-not-allowed border-border text-muted-foreground/50"
+                  }`}
+                >
+                  Delete all items
+                </button>
+              </div>
+            </div>
+
+            <div className="pt-2">
+              <p className="px-1 pb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                Account
+              </p>
+              <div className="space-y-2">
+                <div className="flex min-h-11 items-center justify-between rounded-xl border border-border bg-card px-4 text-sm">
+                  <span className="text-muted-foreground">
+                    Signed in as <span className="font-medium text-foreground">{account.name}</span>
+                  </span>
+                  {account.role === "admin" && (
+                    <span className="rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-semibold text-primary">
+                      Admin
+                    </span>
+                  )}
+                </div>
+                <button
+                  onClick={() => setShowStaffPanel(true)}
+                  className="flex min-h-11 w-full items-center gap-3 rounded-xl border border-border bg-card px-4 text-left text-sm font-medium text-foreground transition-colors hover:bg-muted"
+                >
+                  Staff accounts
+                </button>
+                <button
+                  onClick={() => {
+                    if (confirm("Log out?")) {
+                      try {
+                        localStorage.removeItem(AUTH_KEY);
+                      } catch {
+                        /* ignore */
+                      }
+                      setAccount(null);
+                      setSessionPassword(null);
+                    }
+                  }}
+                  className="flex min-h-11 w-full items-center gap-3 rounded-xl border border-border bg-card px-4 text-left text-sm font-medium text-foreground transition-colors hover:bg-muted"
+                >
+                  Log out
+                </button>
+              </div>
+            </div>
+          </div>
         )}
       </div>
 
@@ -1072,7 +1235,130 @@ function Index() {
           onClose={() => setShowStaffPanel(false)}
         />
       )}
+
+      <BottomNav active={activeTab} onChange={setActiveTab} />
     </main>
+  );
+}
+
+const NAV_ITEMS: { id: TabId; label: string; icon: string }[] = [
+  { id: "home", label: "Home", icon: "🏠" },
+  { id: "inventory", label: "Inventory", icon: "📦" },
+  { id: "scan", label: "Scan", icon: "📷" },
+  { id: "reports", label: "Reports", icon: "📊" },
+  { id: "more", label: "More", icon: "⚙️" },
+];
+
+// Fixed bottom tab bar — the app's primary navigation, kept within thumb
+// reach for one-handed use. Each tab is a full-height, >=44px tap target
+// (min-h-11) per mobile touch-target guidelines; the safe-area padding
+// keeps it clear of the home-indicator area on notched phones.
+function BottomNav({ active, onChange }: { active: TabId; onChange: (tab: TabId) => void }) {
+  return (
+    <nav
+      className="fixed inset-x-0 bottom-0 z-20 border-t border-border bg-card shadow-[0_-1px_8px_rgba(0,0,0,0.06)]"
+      style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
+    >
+      <div className="mx-auto flex max-w-3xl items-stretch">
+        {NAV_ITEMS.map((item) => {
+          const isActive = active === item.id;
+          return (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => onChange(item.id)}
+              aria-current={isActive ? "page" : undefined}
+              className={`flex min-h-11 flex-1 flex-col items-center justify-center gap-0.5 py-1.5 text-[10px] font-medium transition-colors ${
+                isActive ? "text-primary" : "text-muted-foreground"
+              }`}
+            >
+              <span className="text-lg leading-none" aria-hidden="true">
+                {item.icon}
+              </span>
+              {item.label}
+            </button>
+          );
+        })}
+      </div>
+    </nav>
+  );
+}
+
+// Camera-based barcode scanner (Scan tab). Decodes continuously from the
+// device's camera and reports the first successful read; the camera is
+// stopped as soon as something is found (or the component unmounts) so it
+// never keeps running in the background.
+function ScanTab({ onDetected }: { onDetected: (text: string) => void }) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const onDetectedRef = useRef(onDetected);
+  onDetectedRef.current = onDetected;
+  const [status, setStatus] = useState<"starting" | "scanning" | "error">("starting");
+  const [error, setError] = useState<string | null>(null);
+  const [restartToken, setRestartToken] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    let controls: { stop: () => void } | null = null;
+
+    (async () => {
+      try {
+        const { BrowserMultiFormatReader } = await import("@zxing/browser");
+        const reader = new BrowserMultiFormatReader();
+        const c = await reader.decodeFromVideoDevice(undefined, videoRef.current ?? undefined, (result) => {
+          if (result && !cancelled) {
+            onDetectedRef.current(result.getText());
+          }
+        });
+        if (cancelled) {
+          c.stop();
+          return;
+        }
+        controls = c;
+        setStatus("scanning");
+      } catch (err) {
+        if (cancelled) return;
+        console.error("Camera/scanner error", err);
+        setError("Could not access the camera. Check camera permissions for this site and try again.");
+        setStatus("error");
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      controls?.stop();
+    };
+  }, [restartToken]);
+
+  return (
+    <div className="py-4">
+      <div className="relative aspect-[3/4] w-full overflow-hidden rounded-2xl border border-border bg-black">
+        <video ref={videoRef} muted playsInline autoPlay className="size-full object-cover" />
+        {status === "scanning" && (
+          <div className="pointer-events-none absolute inset-8 rounded-2xl border-2 border-white/70" />
+        )}
+        {status === "error" && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/80 p-6 text-center">
+            <p className="text-sm text-white">{error}</p>
+            <button
+              type="button"
+              onClick={() => {
+                setStatus("starting");
+                setError(null);
+                setRestartToken((n) => n + 1);
+              }}
+              className="min-h-11 rounded-lg bg-white px-4 text-sm font-medium text-black"
+            >
+              Try again
+            </button>
+          </div>
+        )}
+      </div>
+      <p className="mt-3 text-center text-sm text-muted-foreground">
+        {status === "starting" && "Starting camera…"}
+        {status === "scanning" && "Point the camera at a barcode."}
+        {status === "error" && "Camera unavailable."}
+      </p>
+    </div>
   );
 }
 
@@ -1114,75 +1400,181 @@ function Row({
   const isDone = counted !== undefined;
   const diff = isDone ? counted - item.qty : 0;
 
+  // Swipe left reveals Delete (right edge), swipe right reveals Edit (left
+  // edge) — only for custom, non-deleted rows that aren't mid bulk-select.
+  // The reveal is a two-step interaction (swipe, then tap the revealed
+  // button, then confirm for delete) so it's no more accident-prone than
+  // the equivalent buttons in the expanded row below; it's just reachable
+  // one-handed without opening the row first.
+  const swipeEnabled = isCustom && !isDeleted && !selectMode;
+  const ACTION_WIDTH = 76;
+  const [dragX, setDragX] = useState(0);
+  const [swiping, setSwiping] = useState(false);
+  const dragRef = useRef<{ startX: number; startY: number; base: number; axis: "x" | "y" | null } | null>(null);
+
+  const closeSwipe = () => setDragX(0);
+
+  const onSwipePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!swipeEnabled) return;
+    dragRef.current = { startX: e.clientX, startY: e.clientY, base: dragX, axis: null };
+  };
+  const onSwipePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const st = dragRef.current;
+    if (!st) return;
+    const dx = e.clientX - st.startX;
+    const dy = e.clientY - st.startY;
+    if (st.axis === null) {
+      if (Math.abs(dx) < 6 && Math.abs(dy) < 6) return;
+      st.axis = Math.abs(dx) > Math.abs(dy) ? "x" : "y";
+      if (st.axis === "x") {
+        setSwiping(true);
+        e.currentTarget.setPointerCapture(e.pointerId);
+      }
+    }
+    if (st.axis !== "x") return;
+    e.preventDefault();
+    setDragX(Math.max(-ACTION_WIDTH, Math.min(ACTION_WIDTH, st.base + dx)));
+  };
+  const endSwipeDrag = () => {
+    const st = dragRef.current;
+    dragRef.current = null;
+    setSwiping(false);
+    if (!st || st.axis !== "x") return;
+    setDragX((x) => (x > ACTION_WIDTH / 2 ? ACTION_WIDTH : x < -ACTION_WIDTH / 2 ? -ACTION_WIDTH : 0));
+  };
+
+  const borderClass = selected
+    ? "border-primary"
+    : isDeleted
+      ? "border-border"
+      : isDone
+        ? "border-primary/30"
+        : "border-border";
+  const bgClass = selected
+    ? "bg-primary/10"
+    : isDeleted
+      ? "bg-muted/30 opacity-70"
+      : isDone
+        ? "bg-primary/5"
+        : "bg-card";
+
   return (
-    <li
-      className={`overflow-hidden rounded-xl border transition-colors ${
-        selected
-          ? "border-primary bg-primary/10"
-          : isDeleted
-            ? "border-border bg-muted/30 opacity-70"
-            : isDone
-              ? "border-primary/30 bg-primary/5"
-              : "border-border bg-card"
-      }`}
-    >
-      <div className="flex items-center gap-3 px-3 py-3">
-        {selectMode ? (
-          <input
-            type="checkbox"
-            aria-label={`Select ${item.name}`}
-            checked={selected}
-            onChange={onToggleSelect}
-            className="size-5 shrink-0 accent-primary"
-          />
-        ) : (
+    <li className={`relative overflow-hidden rounded-xl border transition-colors ${borderClass}`}>
+      {swipeEnabled && (
+        <>
           <button
-            aria-label={isDone ? "Mark as not counted" : "Mark as counted"}
+            type="button"
+            tabIndex={-1}
+            aria-hidden="true"
             onClick={() => {
-              if (isDeleted || !isDone) {
-                setOpen((o) => !o);
+              onEdit();
+              closeSwipe();
+            }}
+            style={{ width: ACTION_WIDTH }}
+            className="absolute inset-y-0 left-0 flex items-center justify-center bg-primary text-xs font-semibold text-primary-foreground"
+          >
+            Edit
+          </button>
+          <button
+            type="button"
+            tabIndex={-1}
+            aria-hidden="true"
+            onClick={() => {
+              if (!isAdmin) {
+                alert("Only an admin can delete items.");
+                closeSwipe();
                 return;
               }
-              onClear();
+              if (confirm(`Delete "${item.name}" from inventory?`)) onDelete();
+              closeSwipe();
             }}
-            disabled={isDeleted}
-            className={`flex size-8 shrink-0 items-center justify-center rounded-full border text-sm transition-colors ${
-              isDeleted
-                ? "border-input text-muted-foreground/40"
-                : isDone
-                  ? "border-primary bg-primary text-primary-foreground"
-                  : "border-input text-muted-foreground"
-            }`}
+            style={{ width: ACTION_WIDTH }}
+            className="absolute inset-y-0 right-0 flex items-center justify-center bg-destructive text-xs font-semibold text-destructive-foreground"
           >
-            {isDone ? "✓" : ""}
+            Delete
           </button>
-        )}
-        <button
-          onClick={() => (selectMode ? onToggleSelect() : setOpen((o) => !o))}
-          className="min-w-0 flex-1 text-left"
-        >
-          <p className="flex items-center gap-1.5 truncate text-sm font-medium text-foreground">
-            {showOutlet && (
-              <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground">
-                {item.outlet}
-              </span>
-            )}
-            <span className="truncate">{item.name}</span>
-          </p>
-          <p className="text-xs text-muted-foreground">
-            #{item.id} · system {item.qty} · MVR {item.price.toFixed(2)}
-            {isDone && (
-              <span className={diff === 0 ? " font-medium text-primary" : " font-medium text-destructive"}>
-                {" "}
-                · counted {counted} ({diff > 0 ? "+" : ""}
-                {diff})
-              </span>
-            )}
-          </p>
-        </button>
-      </div>
+        </>
+      )}
+      <div
+        onPointerDown={onSwipePointerDown}
+        onPointerMove={onSwipePointerMove}
+        onPointerUp={endSwipeDrag}
+        onPointerCancel={endSwipeDrag}
+        style={{
+          transform: `translateX(${dragX}px)`,
+          transition: swiping ? "none" : "transform 0.2s ease",
+          touchAction: swipeEnabled ? "pan-y" : undefined,
+        }}
+        className={`relative ${bgClass}`}
+      >
+        <div className="flex items-center gap-3 px-3 py-3">
+          {selectMode ? (
+            <input
+              type="checkbox"
+              aria-label={`Select ${item.name}`}
+              checked={selected}
+              onChange={onToggleSelect}
+              className="size-5 shrink-0 accent-primary"
+            />
+          ) : (
+            <button
+              aria-label={isDone ? "Mark as not counted" : "Mark as counted"}
+              onClick={() => {
+                if (dragX !== 0) {
+                  closeSwipe();
+                  return;
+                }
+                if (isDeleted || !isDone) {
+                  setOpen((o) => !o);
+                  return;
+                }
+                onClear();
+              }}
+              disabled={isDeleted}
+              className={`flex size-8 shrink-0 items-center justify-center rounded-full border text-sm transition-colors ${
+                isDeleted
+                  ? "border-input text-muted-foreground/40"
+                  : isDone
+                    ? "border-primary bg-primary text-primary-foreground"
+                    : "border-input text-muted-foreground"
+              }`}
+            >
+              {isDone ? "✓" : ""}
+            </button>
+          )}
+          <button
+            onClick={() => {
+              if (dragX !== 0) {
+                closeSwipe();
+                return;
+              }
+              if (selectMode) onToggleSelect();
+              else setOpen((o) => !o);
+            }}
+            className="min-w-0 flex-1 text-left"
+          >
+            <p className="flex items-center gap-1.5 truncate text-sm font-medium text-foreground">
+              {showOutlet && (
+                <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground">
+                  {item.outlet}
+                </span>
+              )}
+              <span className="truncate">{item.name}</span>
+            </p>
+            <p className="text-xs text-muted-foreground">
+              #{item.id} · system {item.qty} · MVR {item.price.toFixed(2)}
+              {isDone && (
+                <span className={diff === 0 ? " font-medium text-primary" : " font-medium text-destructive"}>
+                  {" "}
+                  · counted {counted} ({diff > 0 ? "+" : ""}
+                  {diff})
+                </span>
+              )}
+            </p>
+          </button>
+        </div>
 
-      {open && (
+        {open && (
         <div className="space-y-3 border-t border-border bg-muted/40 px-3 py-3">
           <div className="grid grid-cols-2 gap-2 text-xs text-muted-foreground">
             <span>Outlet: <span className="text-foreground">{item.outlet}</span></span>
@@ -1287,7 +1679,8 @@ function Row({
             </>
           )}
         </div>
-      )}
+        )}
+      </div>
     </li>
   );
 }
